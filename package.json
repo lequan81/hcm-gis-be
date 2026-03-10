@@ -1,0 +1,18 @@
+{
+  "name": "hcm-tiles-backend",
+  "version": "2.0.0",
+  "description": "HCMC 3D Building Tiles — Bun API backend",
+  "scripts": {
+    "dev": "bun run --watch src/app.ts",
+    "start": "bun run src/app.ts"
+  },
+  "dependencies": {
+    "@mapbox/vector-tile": "^2.0.3",
+    "archiver": "^7.0.1",
+    "pbf": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/archiver": "^7.0.0",
+    "@types/bun": "^1.3.10"
+  }
+}
