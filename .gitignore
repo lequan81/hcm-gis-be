@@ -7,3 +7,5 @@ dist/
 # Bun
 bun.lock
 .env
+logs/*
+output/*

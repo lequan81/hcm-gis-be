@@ -1,31 +1,19 @@
 /**
- * Download-all worker — downloads ALL unique tiles across all districts
- * into a single comprehensive MBTiles file for HCM.
+ * Download ALL worker — fetches all HCM district tiles in a single deduplicated batch.
  *
- * Receives: { zoom, overlap, geojson, outputDir, concurrency, apiUrl, referer, origin, retryDelay }
- * Posts back: ProgressInfo messages and a final result.
+ * Receives: { zoom, overlap, geojson, outputDir, concurrency, apiUrl, referer, origin, retryDelay, sleepMs, batchSize }
+ * Posts back: ProgressInfo messages and a final DownloadOutput | null.
  */
 
 declare var self: Worker;
 
-import { existsSync, mkdirSync, unlinkSync } from "fs";
-import { log } from "./logger";
-import { MBTilesWriter } from "./mbtiles";
-import { ALL_KEYS, DISTRICTS, bboxToTileRange } from "./districts";
-
-interface WorkerInput {
-  zoom: number;
-  overlap: number;
-  geojson: boolean;
-  outputDir: string;
-  concurrency: number;
-  apiUrl: string;
-  referer: string;
-  origin: string;
-  retryDelay: number;
-}
-
-interface TileResult { z: number; x: number; y: number; data: Uint8Array }
+import { existsSync, mkdirSync, unlinkSync, appendFileSync } from "fs";
+import { join } from "path";
+import { log } from "../utils/logger";
+import { MBTilesWriter } from "../utils/mbtiles";
+import { DISTRICTS, getAllTilesDeduplicated } from "../utils/districts";
+import { getVNDateParts } from "../utils/date";
+import type { WorkerAllInput, TileResult } from "../types/worker";
 
 function tileToLonLat(z: number, x: number, y: number): [number, number, number, number] {
   const n = 2 ** z;
@@ -50,15 +38,24 @@ function computeCentroid(geometry: { type: string; coordinates: any }): [number,
 
 let cancelled = false;
 
-// listen for cancel messages
 self.addEventListener("message", (e: MessageEvent) => {
   if (e.data && (e.data as any).type === "cancel") {
     cancelled = true;
   }
 });
 
-// Patch: Accept LOG_DIR/LOG_FILE from message and set process.env before importing logger
-self.onmessage = async (event: MessageEvent<WorkerInput & { LOG_DIR?: string, LOG_FILE?: string }>) => {
+function createJobLog(logDir: string): (msg: string) => void {
+  const { timestamp } = getVNDateParts();
+  if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
+  const logFile = join(logDir, `download_all_${timestamp}.log`);
+  return (msg: string) => {
+    const { date: d, time: t } = getVNDateParts();
+    const line = `[${d} ${t}] ${msg}`;
+    try { appendFileSync(logFile, line + "\n"); } catch { }
+  };
+}
+
+self.onmessage = async (event: MessageEvent<WorkerAllInput & { LOG_DIR?: string, LOG_FILE?: string }>) => {
   if (event.data && event.data.LOG_DIR) {
     process.env.LOG_DIR = event.data.LOG_DIR;
   }
@@ -66,8 +63,15 @@ self.onmessage = async (event: MessageEvent<WorkerInput & { LOG_DIR?: string, LO
     process.env.LOG_FILE = event.data.LOG_FILE;
   }
   if (event.data && (event.data as any).type === "cancel") { cancelled = true; return; }
-  const { zoom, overlap, geojson, outputDir, concurrency, apiUrl, referer, origin, retryDelay } = event.data;
-  log("INFO", `Download-all worker start: geojson=${geojson}`);
+
+  const { zoom, overlap, geojson, outputDir, concurrency, apiUrl, referer, origin, retryDelay,
+    sleepMs = 20, batchSize = 1000 } = event.data;
+
+  const logDir = event.data.LOG_DIR || "./logs";
+  const jobLog = createJobLog(logDir);
+  jobLog(`Download ALL started`);
+  jobLog(`Config: zoom=${zoom} overlap=${overlap} geojson=${geojson} concurrency=${concurrency} sleepMs=${sleepMs} batchSize=${batchSize}`);
+  log("INFO", `Worker start: ALL districts`);
 
   const headers: Record<string, string> = {
     "User-Agent": "Mozilla/5.0",
@@ -75,34 +79,16 @@ self.onmessage = async (event: MessageEvent<WorkerInput & { LOG_DIR?: string, LO
     Origin: origin,
   };
 
-  // Compute unique tiles across ALL districts
-  const tileSet = new Set<string>();
-  const tiles: [number, number, number][] = [];
-  let lonMin = 180, latMin = 90, lonMax = -180, latMax = -90;
-
-  for (const key of ALL_KEYS) {
-    const d = DISTRICTS[key];
-    lonMin = Math.min(lonMin, d.bbox[0]);
-    latMin = Math.min(latMin, d.bbox[1]);
-    lonMax = Math.max(lonMax, d.bbox[2]);
-    latMax = Math.max(latMax, d.bbox[3]);
-
-    const range = bboxToTileRange(d.bbox, zoom, overlap);
-    for (let x = range.xMin; x <= range.xMax; x++) {
-      for (let y = range.yMin; y <= range.yMax; y++) {
-        const k = `${x},${y}`;
-        if (!tileSet.has(k)) {
-          tileSet.add(k);
-          tiles.push([zoom, x, y]);
-        }
-      }
-    }
-  }
+  // Get all tiles deduplicated across all districts
+  const { tiles, errors } = getAllTilesDeduplicated(zoom, overlap);
+  if (errors > 0) jobLog(`Warning: skipped ${errors} invalid district features`);
 
   const t0 = performance.now();
   const total = tiles.length;
   const results: TileResult[] = [];
   let idx = 0, done = 0, ok = 0, fail = 0;
+
+  jobLog(`Tiles to fetch: ${total} (deduplicated from ${Object.keys(DISTRICTS).length} districts)`);
 
   const send = (phase: string) => {
     self.postMessage({ type: "progress", data: { done, total, ok, fail, phase, district: "all" } });
@@ -133,69 +119,73 @@ self.onmessage = async (event: MessageEvent<WorkerInput & { LOG_DIR?: string, LO
       if (cancelled) break;
       if (data) { results.push({ z, x, y, data }); ok++; } else { fail++; }
       done++;
-      if (done % Math.max(1, Math.floor(total / 100)) === 0) send("downloading");
-      await Bun.sleep(30 + Math.random() * 70);
+      if (done % 5 === 0) send("downloading");
+      if (sleepMs > 0) await Bun.sleep(sleepMs + Math.random() * (sleepMs * 0.5));
     }
   }
 
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
   send("downloading");
 
-  if (cancelled) { log("INFO", `Download-all cancelled early`); self.postMessage({ type: "result", data: null }); return; }
-
-  if (results.length === 0) { self.postMessage({ type: "result", data: null }); return; }
-
-  // Write single MBTiles
-  if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
-  // Use Vietnam local time for output file names
-  function getVNDateParts() {
-    const now = new Date();
-    const opts = { timeZone: 'Asia/Ho_Chi_Minh', hour12: false };
-    const dateStr = now.toLocaleDateString('vi-VN', opts).split('/').reverse().map(s => s.padStart(2, '0')).join('');
-    const timeStr = now.toLocaleTimeString('vi-VN', opts).replace(/:/g, '');
-    return { date: dateStr, time: timeStr };
+  if (cancelled) {
+    jobLog(`Cancelled early. ok=${ok} fail=${fail}`);
+    log("INFO", `Worker cancelled early: ALL`);
+    self.postMessage({ type: "result", data: null });
+    return;
   }
-  const { date, time } = getVNDateParts();
-  const mbtilesPath = `${outputDir}/hcm_all_${date}_${time}.mbtiles`;
+
+  if (results.length === 0) {
+    jobLog(`No tiles fetched. fail=${fail}`);
+    self.postMessage({ type: "result", data: null });
+    return;
+  }
+
+  // Write MBTiles
+  if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
+  const { timestamp } = getVNDateParts();
+  const uuid = crypto.randomUUID();
+  const mbtilesPath = join(outputDir, `hcm_all_${timestamp}_${uuid}.mbtiles`);
 
   send("writing_mbtiles");
-  const bounds = [lonMin, latMin, lonMax, latMax];
   const writer = new MBTilesWriter(mbtilesPath, {
-    name: "HCMC All Buildings",
-    description: "Building tiles for all HCMC districts",
+    name: "HCMC All Districts Buildings",
+    description: "Building tiles for all HCM City districts",
     format: "pbf",
     type: "overlay",
-    bounds: bounds.join(","),
-    center: `${(lonMin + lonMax) / 2},${(latMin + latMax) / 2},${zoom}`,
+    bounds: "106.48,10.32,107.01,11.16",
+    center: `106.69,10.77,${zoom}`,
     minzoom: String(zoom),
     maxzoom: String(zoom),
     json: JSON.stringify({
       vector_layers: [{
-        id: "region_building3d_index", description: "HCMC buildings",
+        id: "region_building3d_index", description: "All HCMC buildings",
         fields: { height: "Number", base_height: "Number", landmark: "String", madoituong: "String" }
       }],
     }),
   });
 
-  const BATCH = 500;
-  for (let i = 0; i < results.length; i += BATCH) {
+  for (let i = 0; i < results.length; i += batchSize) {
     if (cancelled) break;
-    writer.writeBatch(results.slice(i, i + BATCH));
+    writer.writeBatch(results.slice(i, i + batchSize));
   }
   if (cancelled) {
-    log("INFO", `Download-all cancelled during write`);
+    log("INFO", `Worker cancelled during write: ALL`);
+    jobLog(`Cancelled during write`);
     try { writer.close(); } catch { }
-    try { unlinkSync(mbtilesPath); log("INFO", `Removed partial file: ${mbtilesPath}`); } catch { }
+    try { unlinkSync(mbtilesPath); } catch { }
     self.postMessage({ type: "result", data: null });
     return;
   }
   writer.close();
 
+  const elapsed = (performance.now() - t0) / 1000;
+  const sizeMB = (Bun.file(mbtilesPath).size / 1048576).toFixed(1);
+
   const output: any = {
     mbtilesPath,
     tileCount: writer.count,
-    elapsed: (performance.now() - t0) / 1000,
-    sizeMB: (Bun.file(mbtilesPath).size / 1048576).toFixed(1),
+    elapsed,
+    sizeMB,
   };
 
   // GeoJSON extraction
@@ -223,8 +213,16 @@ self.onmessage = async (event: MessageEvent<WorkerInput & { LOG_DIR?: string, LO
     await Bun.write(gjPath, JSON.stringify({ type: "FeatureCollection", features }));
     output.featureCount = features.length;
     output.geojsonPath = gjPath;
+    jobLog(`GeoJSON: ${features.length} features → ${gjPath}`);
   }
 
-  log("INFO", `Download-all done: tiles=${output.tileCount} sizeMB=${output.sizeMB}`);
+  jobLog(`--- SUMMARY ---`);
+  jobLog(`Tiles: ${ok} ok, ${fail} fail, ${total} total`);
+  jobLog(`Output: ${mbtilesPath} (${sizeMB} MB)`);
+  jobLog(`Elapsed: ${elapsed.toFixed(1)}s`);
+  if (output.featureCount !== undefined) jobLog(`GeoJSON features: ${output.featureCount}`);
+  jobLog(`--- END ---`);
+
+  log("INFO", `Worker done: ALL tiles=${output.tileCount} sizeMB=${output.sizeMB}`);
   self.postMessage({ type: "result", data: output });
 };

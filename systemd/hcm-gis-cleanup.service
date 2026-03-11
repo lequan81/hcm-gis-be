@@ -1,0 +1,11 @@
+[Unit]
+Description=HCM-GIS old output file cleanup
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/hcm-gis/hcm-gis-be/cleanup-old-files.sh 7
+User=www-data
+Group=www-data
+StandardOutput=journal
+StandardError=journal

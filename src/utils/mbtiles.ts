@@ -6,18 +6,9 @@
  */
 
 import { Database } from "bun:sqlite";
+import type { MBTilesMetadata } from "../types/mbtiles";
 
-export interface MBTilesMetadata {
-  name: string;
-  description?: string;
-  format: "pbf" | "png" | "jpg" | "webp";
-  type?: "overlay" | "baselayer";
-  bounds?: string;
-  center?: string;
-  minzoom?: string;
-  maxzoom?: string;
-  json?: string;
-}
+export type { MBTilesMetadata };
 
 export class MBTilesWriter {
   private db: Database;
@@ -27,8 +18,11 @@ export class MBTilesWriter {
   constructor(filepath: string, metadata: MBTilesMetadata) {
     this.db = new Database(filepath, { create: true });
 
+    this.db.run("PRAGMA page_size = 8192");
     this.db.run("PRAGMA journal_mode = WAL");
     this.db.run("PRAGMA synchronous = NORMAL");
+    this.db.run("PRAGMA cache_size = -64000");
+    this.db.run("PRAGMA mmap_size = 268435456"); // 256MB memory mapping
 
     this.db.run(`
       CREATE TABLE IF NOT EXISTS metadata (

@@ -5,10 +5,9 @@
  * Tile range computation with configurable border overlap.
  */
 
-export interface District {
-  name: string;
-  bbox: [number, number, number, number]; // [lon_min, lat_min, lon_max, lat_max]
-}
+import type { District, TileRange } from "../types/district";
+
+export type { District, TileRange };
 
 export const DISTRICTS: Record<string, District> = {
   // ── Urban districts (Quận) ──
@@ -60,11 +59,7 @@ function latToTileY(lat: number, n: number): number {
   );
 }
 
-export interface TileRange {
-  xMin: number; yMin: number;
-  xMax: number; yMax: number;
-  count: number;
-}
+
 
 export function bboxToTileRange(
   bbox: [number, number, number, number],
@@ -106,4 +101,31 @@ export function getTilesForDistrict(
     }
   }
   return { tiles, range };
+}
+
+export function getAllTilesDeduplicated(
+  zoom: number = 16,
+  overlap: number = 3,
+): { tiles: [number, number, number][]; errors: number } {
+  const tileSet = new Set<string>();
+  let errors = 0;
+
+  for (const key of Object.keys(DISTRICTS)) {
+    try {
+      const { tiles } = getTilesForDistrict(key, zoom, overlap);
+      for (const t of tiles) {
+        tileSet.add(`${t[0]},${t[1]},${t[2]}`);
+      }
+    } catch {
+      errors++;
+    }
+  }
+
+  const result: [number, number, number][] = [];
+  for (const t of tileSet) {
+    const [z, x, y] = t.split(",").map(Number);
+    result.push([z, x, y]);
+  }
+
+  return { tiles: result, errors };
 }

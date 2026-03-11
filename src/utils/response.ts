@@ -1,4 +1,4 @@
-import { env } from "./env";
+import { env } from "../config";
 
 export function corsHeaders(requestOrigin?: string | null): Record<string, string> {
   const origin =

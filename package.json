@@ -3,8 +3,9 @@
   "version": "2.0.0",
   "description": "HCMC 3D Building Tiles — Bun API backend",
   "scripts": {
-    "dev": "bun run --watch src/app.ts",
-    "start": "bun run src/app.ts"
+    "dev": "bun run --watch src/main.ts",
+    "build": "bun run build.ts",
+    "start": "NODE_ENV=production bun run dist/main.js"
   },
   "dependencies": {
     "@mapbox/vector-tile": "^2.0.3",
