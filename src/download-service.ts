@@ -4,6 +4,9 @@ import { log } from "./logger";
 import { registerMBTiles, unregisterMBTilesByPath } from "./mbtiles-registry";
 import { readdirSync, statSync, unlinkSync } from "fs";
 
+const isProd = process.env.NODE_ENV === "production";
+const ext = isProd ? "js" : "ts";
+
 // Track workers by token so they can be cancelled from an external request
 const workerMap = new Map<string, Worker[]>();
 
@@ -48,7 +51,7 @@ export function createDownloadAllStream(geojson: boolean, token: string | null =
 
       log("INFO", "Download ALL started");
       try {
-        const worker = new Worker(new URL("./download-all-worker.ts", import.meta.url).href);
+        const worker = new Worker(new URL(`./download-all-worker.${ext}`, import.meta.url).href);
         registerWorker(token, worker);
         const result = await new Promise<any>((res) => {
           worker.onmessage = (e: MessageEvent) => {
@@ -99,7 +102,7 @@ export function createDownloadStream(keys: string[], geojson: boolean, token: st
       for (const key of keys) {
         log("INFO", `Download started: ${key}`);
         try {
-          const worker = new Worker(new URL("./download-worker.ts", import.meta.url).href);
+          const worker = new Worker(new URL(`./download-worker.${ext}`, import.meta.url).href);
           registerWorker(token, worker);
           const result = await new Promise<any>((res) => {
             worker.onmessage = (e: MessageEvent) => {
