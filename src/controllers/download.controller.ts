@@ -4,8 +4,9 @@ import { createDownloadStream, createDownloadAllStream, cancelWorkers } from "..
 import { getVNDateParts } from "../utils/date";
 import { log } from "../utils/logger";
 import archiver from "archiver";
-import { PassThrough, Readable } from "stream";
-import { existsSync } from "fs";
+import { existsSync, createWriteStream } from "fs";
+import { join } from "path";
+import { env } from "../config";
 
 export class DownloadController {
 
@@ -46,7 +47,7 @@ export class DownloadController {
     });
   }
 
-  static downloadBundle(req: Request, url: URL) {
+  static async downloadBundle(req: Request, url: URL) {
     const origin = req.headers.get("origin");
     const ids = (url.searchParams.get("ids") || "").split(",").filter(s => /^[a-f0-9\-]+$/i.test(s));
     if (ids.length === 0) return json({ error: "No IDs" }, 400, origin);
@@ -65,23 +66,32 @@ export class DownloadController {
     }
     if (files.length === 0) return json({ error: "No files found" }, 404, origin);
 
-    const archive = archiver("zip", { zlib: { level: 1 } });
-    for (const f of files) archive.file(f.path, { name: f.name });
+    const zipId = crypto.randomUUID();
+    const zipPath = join(env.OUTPUT_DIR, `hcm-bundle-${zipId}.zip`);
 
-    const pass = new PassThrough();
-    archive.pipe(pass);
-    archive.on("warning", (err) => log("WARN", `Archiver: ${err.message}`));
-    archive.on("error", (err) => log("ERROR", `Archiver error: ${err.message}`));
-    archive.finalize();
+    await new Promise<void>((resolve, reject) => {
+      const output = createWriteStream(zipPath);
+      const archive = archiver("zip", { zlib: { level: 1 } });
+      
+      output.on("close", () => resolve());
+      archive.on("warning", (err) => log("WARN", `Archiver: ${err.message}`));
+      archive.on("error", (err) => {
+        log("ERROR", `Archiver error: ${err.message}`);
+        reject(err);
+      });
 
-    const webStream = Readable.toWeb(pass) as unknown as ReadableStream;
+      archive.pipe(output);
+      for (const f of files) archive.file(f.path, { name: f.name });
+      archive.finalize();
+    });
+
+    const file = Bun.file(zipPath);
     const { timestamp } = getVNDateParts();
     
-    return new Response(webStream, {
+    return new Response(file, {
       headers: {
         "Content-Type": "application/zip",
         "Content-Disposition": `attachment; filename="hcm-tiles-${timestamp}.zip"`,
-        "Transfer-Encoding": "chunked",
         ...corsHeaders(origin),
       },
     });

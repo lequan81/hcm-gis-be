@@ -22,7 +22,7 @@ log() {
 
 log "=== Local Cleanup started (max age: ${MAX_DAYS} days) ==="
 
-BEFORE=$(find "$OUTPUT_DIR" -type f \( -name "*.mbtiles" -o -name "*.geojson" \) -mtime +"$MAX_DAYS" 2>/dev/null | wc -l)
+BEFORE=$(find "$OUTPUT_DIR" -type f \( -name "*.mbtiles" -o -name "*.geojson" -o -name "*.zip" \) -mtime +"$MAX_DAYS" 2>/dev/null | wc -l)
 log "Files older than ${MAX_DAYS} days: ${BEFORE}"
 
 if [ "$BEFORE" -eq 0 ]; then
@@ -31,13 +31,13 @@ if [ "$BEFORE" -eq 0 ]; then
 fi
 
 DELETED=0
-find "$OUTPUT_DIR" -type f \( -name "*.mbtiles" -o -name "*.geojson" \) -mtime +"$MAX_DAYS" -print0 | while IFS= read -r -d '' file; do
+find "$OUTPUT_DIR" -type f \( -name "*.mbtiles" -o -name "*.geojson" -o -name "*.zip" \) -mtime +"$MAX_DAYS" -print0 | while IFS= read -r -d '' file; do
   rm -f "$file"
   log "Deleted: $(basename "$file")"
   DELETED=$((DELETED + 1))
 done
 log "Manually deleted $DELETED file(s)"
 
-AFTER=$(find "$OUTPUT_DIR" -type f \( -name "*.mbtiles" -o -name "*.geojson" \) 2>/dev/null | wc -l)
+AFTER=$(find "$OUTPUT_DIR" -type f \( -name "*.mbtiles" -o -name "*.geojson" -o -name "*.zip" \) 2>/dev/null | wc -l)
 log "Remaining files: ${AFTER}"
 log "=== Local Cleanup finished ==="
