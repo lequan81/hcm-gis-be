@@ -71,7 +71,7 @@ export class DownloadController {
 
     await new Promise<void>((resolve, reject) => {
       const output = createWriteStream(zipPath);
-      const archive = archiver("zip", { zlib: { level: 1 } });
+      const archive = archiver("zip", { store: true }); // MBTiles are already compressed
       
       output.on("close", () => resolve());
       archive.on("warning", (err) => log("WARN", `Archiver: ${err.message}`));
