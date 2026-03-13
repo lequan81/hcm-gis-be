@@ -65,7 +65,7 @@ self.onmessage = async (event: MessageEvent<WorkerAllInput & { LOG_DIR?: string,
   if (event.data && (event.data as any).type === "cancel") { cancelled = true; return; }
 
   const { zoom, overlap, geojson, outputDir, concurrency, apiUrl, referer, origin, retryDelay,
-    sleepMs = 20, batchSize = 1000 } = event.data;
+    sleepMs = 10, batchSize = 1000 } = event.data;
 
   const logDir = event.data.LOG_DIR || "./logs";
   const jobLog = createJobLog(logDir);
@@ -119,8 +119,8 @@ self.onmessage = async (event: MessageEvent<WorkerAllInput & { LOG_DIR?: string,
       if (cancelled) break;
       if (data) { results.push({ z, x, y, data }); ok++; } else { fail++; }
       done++;
-      if (done % 5 === 0) send("downloading");
-      if (sleepMs > 0) await Bun.sleep(sleepMs + Math.random() * (sleepMs * 0.5));
+      if (done % 2 === 0) send("downloading");
+      if (sleepMs > 0) await Bun.sleep(sleepMs + Math.random() * (sleepMs * 0.3));
     }
   }
 

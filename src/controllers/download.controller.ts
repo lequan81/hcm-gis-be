@@ -3,8 +3,8 @@ import { getMBTilesPath, getMBTilesName } from "../services/mbtiles-registry.ser
 import { createDownloadStream, createDownloadAllStream, cancelWorkers } from "../services/download-orchestrator.service";
 import { getVNDateParts } from "../utils/date";
 import { log } from "../utils/logger";
-import archiver from "archiver";
-import { existsSync, createWriteStream } from "fs";
+import { ZipStreamer, type ZipEntry } from "../utils/zip";
+import { existsSync, statSync } from "fs";
 import { join } from "path";
 import { env } from "../config";
 
@@ -52,46 +52,28 @@ export class DownloadController {
     const ids = (url.searchParams.get("ids") || "").split(",").filter(s => /^[a-f0-9\-]+$/i.test(s));
     if (ids.length === 0) return json({ error: "No IDs" }, 400, origin);
 
-    const files: { path: string; name: string }[] = [];
+    const zipEntries: ZipEntry[] = [];
     for (const id of ids) {
       const p = getMBTilesPath(id);
       const n = getMBTilesName(id);
-      if (p && n) {
-        files.push({ path: p, name: n });
+      if (p && n && existsSync(p)) {
+        zipEntries.push({ path: p, name: n, size: statSync(p).size });
         const gjPath = p.replace(".mbtiles", ".geojson");
         if (existsSync(gjPath)) {
-          files.push({ path: gjPath, name: n.replace(".mbtiles", ".geojson") });
+          zipEntries.push({ path: gjPath, name: n.replace(".mbtiles", ".geojson"), size: statSync(gjPath).size });
         }
       }
     }
-    if (files.length === 0) return json({ error: "No files found" }, 404, origin);
+    if (zipEntries.length === 0) return json({ error: "No files found" }, 404, origin);
 
-    const zipId = crypto.randomUUID();
-    const zipPath = join(env.OUTPUT_DIR, `hcm-bundle-${zipId}.zip`);
-
-    await new Promise<void>((resolve, reject) => {
-      const output = createWriteStream(zipPath);
-      const archive = archiver("zip", { store: true }); // MBTiles are already compressed
-      
-      output.on("close", () => resolve());
-      archive.on("warning", (err) => log("WARN", `Archiver: ${err.message}`));
-      archive.on("error", (err) => {
-        log("ERROR", `Archiver error: ${err.message}`);
-        reject(err);
-      });
-
-      archive.pipe(output);
-      for (const f of files) archive.file(f.path, { name: f.name });
-      archive.finalize();
-    });
-
-    const file = Bun.file(zipPath);
     const { timestamp } = getVNDateParts();
-    
-    return new Response(file, {
+    const totalSize = ZipStreamer.calculateTotalSize(zipEntries);
+
+    return new Response(ZipStreamer.createStream(zipEntries), {
       headers: {
         "Content-Type": "application/zip",
         "Content-Disposition": `attachment; filename="hcm-tiles-${timestamp}.zip"`,
+        "Content-Length": String(totalSize),
         ...corsHeaders(origin),
       },
     });

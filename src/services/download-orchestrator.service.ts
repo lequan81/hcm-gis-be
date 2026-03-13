@@ -18,8 +18,10 @@ const cancelledTokens = new Set<string>();
  */
 function getWorkerUrl(filename: string): URL {
   const isProd = process.env.NODE_ENV === "production" || import.meta.url.endsWith(".js");
-  const ext = isProd ? "js" : "ts";
-  return new URL(`../workers/${filename}.${ext}`, import.meta.url);
+  // In dev: src/services/ -> ../workers/*.ts
+  // In prod: dist/main.js -> ./workers/*.js
+  const path = isProd ? `./workers/${filename}.js` : `../workers/${filename}.ts`;
+  return new URL(path, import.meta.url);
 }
 
 /**
@@ -93,6 +95,22 @@ export function cancelWorkers(token: string) {
   }, 2000);
 
   return n;
+}
+
+/**
+ * Terminate ALL active workers across all tokens (for graceful shutdown).
+ */
+export function terminateAllWorkers(): number {
+  let terminated = 0;
+  for (const [token, arr] of activeWorkers.entries()) {
+    for (const w of arr) {
+      try { w.terminate(); terminated++; } catch { }
+    }
+    activeWorkers.delete(token);
+  }
+  cancelledTokens.clear();
+  if (terminated > 0) log("INFO", `Shutdown: force-terminated ${terminated} worker(s)`);
+  return terminated;
 }
 
 function getCommonPayload(geojson: boolean) {

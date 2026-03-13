@@ -9,11 +9,9 @@
   },
   "dependencies": {
     "@mapbox/vector-tile": "^2.0.3",
-    "archiver": "^7.0.1",
     "pbf": "^4.0.1"
   },
   "devDependencies": {
-    "@types/archiver": "^7.0.0",
     "@types/bun": "^1.3.10"
   }
 }

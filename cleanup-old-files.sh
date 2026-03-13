@@ -1,15 +1,14 @@
 #!/bin/bash
-# ── HCM-GIS Output Cleanup Script ──
-# Deletes .mbtiles and .geojson files older than 7 days
-# (The backend has a setInterval watcher that detects these deletions
-# and automatically closes any open SQLite connections to release handles.)
+# ── HCM-GIS Output & Log Cleanup Script ──
+# Deletes .mbtiles, .geojson, .zip, and .log files older than N hours.
+# (The backend also has an internal retention cleanup that runs hourly.)
 #
-# Usage: ./cleanup-old-files.sh [max_age_days]
-# Default: 7 days
+# Usage: ./cleanup-old-files.sh [max_age_hours]
+# Default: 24 hours
 
 set -euo pipefail
 
-MAX_DAYS="${1:-7}"
+MAX_HOURS="${1:-24}"
 OUTPUT_DIR="/opt/hcm-gis/hcm-gis-be/output"
 LOG_DIR="/opt/hcm-gis/hcm-gis-be/logs"
 LOG_FILE="${LOG_DIR}/cleanup_$(date +%Y%m%d_%H%M%S).log"
@@ -20,24 +19,34 @@ log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
-log "=== Local Cleanup started (max age: ${MAX_DAYS} days) ==="
+log "=== Cleanup started (max age: ${MAX_HOURS} hours) ==="
 
-BEFORE=$(find "$OUTPUT_DIR" -type f \( -name "*.mbtiles" -o -name "*.geojson" -o -name "*.zip" \) -mtime +"$MAX_DAYS" 2>/dev/null | wc -l)
-log "Files older than ${MAX_DAYS} days: ${BEFORE}"
+# Convert hours to minutes for find -mmin
+MAX_MINS=$((MAX_HOURS * 60))
 
-if [ "$BEFORE" -eq 0 ]; then
-  log "Nothing to clean up"
-  exit 0
+# ── Clean output files ──
+BEFORE=$(find "$OUTPUT_DIR" -type f \( -name "*.mbtiles" -o -name "*.geojson" -o -name "*.zip" \) -mmin +"$MAX_MINS" 2>/dev/null | wc -l)
+log "Output files older than ${MAX_HOURS}h: ${BEFORE}"
+
+if [ "$BEFORE" -gt 0 ]; then
+  find "$OUTPUT_DIR" -type f \( -name "*.mbtiles" -o -name "*.geojson" -o -name "*.zip" \) -mmin +"$MAX_MINS" -print0 | while IFS= read -r -d '' file; do
+    rm -f "$file"
+    log "Deleted output: $(basename "$file")"
+  done
 fi
 
-DELETED=0
-find "$OUTPUT_DIR" -type f \( -name "*.mbtiles" -o -name "*.geojson" -o -name "*.zip" \) -mtime +"$MAX_DAYS" -print0 | while IFS= read -r -d '' file; do
-  rm -f "$file"
-  log "Deleted: $(basename "$file")"
-  DELETED=$((DELETED + 1))
-done
-log "Manually deleted $DELETED file(s)"
+# ── Clean old log files ──
+LOG_BEFORE=$(find "$LOG_DIR" -type f -name "*.log" -mmin +"$MAX_MINS" ! -name "$(basename "$LOG_FILE")" 2>/dev/null | wc -l)
+log "Log files older than ${MAX_HOURS}h: ${LOG_BEFORE}"
 
-AFTER=$(find "$OUTPUT_DIR" -type f \( -name "*.mbtiles" -o -name "*.geojson" -o -name "*.zip" \) 2>/dev/null | wc -l)
-log "Remaining files: ${AFTER}"
-log "=== Local Cleanup finished ==="
+if [ "$LOG_BEFORE" -gt 0 ]; then
+  find "$LOG_DIR" -type f -name "*.log" -mmin +"$MAX_MINS" ! -name "$(basename "$LOG_FILE")" -print0 | while IFS= read -r -d '' file; do
+    rm -f "$file"
+    log "Deleted log: $(basename "$file")"
+  done
+fi
+
+AFTER_OUTPUT=$(find "$OUTPUT_DIR" -type f \( -name "*.mbtiles" -o -name "*.geojson" -o -name "*.zip" \) 2>/dev/null | wc -l)
+AFTER_LOGS=$(find "$LOG_DIR" -type f -name "*.log" 2>/dev/null | wc -l)
+log "Remaining: ${AFTER_OUTPUT} output file(s), ${AFTER_LOGS} log file(s)"
+log "=== Cleanup finished ==="

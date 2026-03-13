@@ -22,10 +22,9 @@ export function log(level: "INFO" | "WARN" | "ERROR", msg: string) {
   if (!logFile) initLogFile();
 
   const { date, time } = getVNDateParts();
-  // Using standard hyphenated date and colon time for readable log lines
-  const now = new Date();
-  const d = now.toLocaleDateString("en-CA", { timeZone: "Asia/Ho_Chi_Minh" });
-  const t = now.toLocaleTimeString("en-GB", { timeZone: "Asia/Ho_Chi_Minh", hour12: false });
+  // date is YYYYMMDD, time is HHMMSS. Reformat for readability:
+  const d = `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}`;
+  const t = `${time.slice(0, 2)}:${time.slice(2, 4)}:${time.slice(4, 6)}`;
   const line = `[${d} ${t}] [${level}] ${msg}`;
   
   console.log(line);
