@@ -11,7 +11,7 @@ export function corsHeaders(requestOrigin?: string | null): Record<string, strin
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Content-Type, Range, If-Range",
     ...(env.CORS_ORIGINS.length > 1 ? { Vary: "Origin" } : {}),
   };
 }

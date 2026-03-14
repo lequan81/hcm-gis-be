@@ -70,6 +70,10 @@ Bun.serve({
       if (await rateLimiter.isRateLimited(ip)) return json({ error: "Too many requests" }, 429, origin);
       return DownloadController.downloadBundle(req, url);
     }
+    if (path === "/api/bundle/prepare" && req.method === "GET") {
+      if (await rateLimiter.isRateLimited(ip)) return json({ error: "Too many requests" }, 429, origin);
+      return DownloadController.prepareBundle(req, url);
+    }
 
     // ── API: cancel jobs ──
     if (path === "/api/cancel" && req.method === "POST") {
