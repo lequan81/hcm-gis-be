@@ -35,8 +35,9 @@ export function registerMBTiles(filePath: string): string {
     openDbs.set(id, { db, name, path: filePath });
     log("INFO", `Registered mbtiles #${id}: ${name}`);
     return id;
-  } catch (err: any) {
-    log("ERROR", `Failed to open mbtiles DB ${filePath}: ${err.message}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log("ERROR", `Failed to open mbtiles DB ${filePath}: ${message}`);
     return id; // Return ID anyway to prevent full crash, though downloading will fail
   }
 }
@@ -64,15 +65,17 @@ function scanAndRegister(id: string): string | null {
     const files = readdirSync(dir);
     for (const f of files) {
       if (!f.endsWith(".mbtiles")) continue;
-      if (f.includes(id)) {
+      const match = f.match(/_([a-f0-9\-]{36})\.mbtiles$/i);
+      if (match && match[1] === id) {
         const fullPath = join(dir, f);
         registerMBTiles(fullPath);
         log("INFO", `Disk-scan found mbtiles #${id}: ${f}`);
         return fullPath;
       }
     }
-  } catch (err: any) {
-    log("ERROR", `Disk-scan failed: ${err?.message}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log("ERROR", `Disk-scan failed: ${message}`);
   }
   return null;
 }
@@ -93,8 +96,9 @@ export function scanOutputDirectory(): number {
       log("INFO", `Startup scan: registered ${count} existing mbtiles file(s)`);
     }
     return count;
-  } catch (err: any) {
-    log("ERROR", `Startup scan failed: ${err?.message}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log("ERROR", `Startup scan failed: ${message}`);
     return 0;
   }
 }

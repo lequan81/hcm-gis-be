@@ -30,7 +30,8 @@ export function log(level: "INFO" | "WARN" | "ERROR", msg: string) {
   console.log(line);
   try {
     appendFileSync(logFile, line + "\n");
-  } catch (err: any) {
-    console.error(`Failed to write log to ${logFile}: ${err.message}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`Failed to write log to ${logFile}: ${message}`);
   }
 }

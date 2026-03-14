@@ -41,6 +41,16 @@ export interface TileResult {
   data: Uint8Array;
 }
 
+/** Progress payload emitted by workers during streaming. */
+export interface ProgressInfo {
+  done: number;
+  total: number;
+  ok: number;
+  fail: number;
+  phase: "downloading" | "writing_mbtiles" | "extracting_geojson";
+  district: string;
+}
+
 /** Output returned by workers after a successful download job. */
 export interface DownloadOutput {
   mbtilesPath: string;
@@ -50,3 +60,24 @@ export interface DownloadOutput {
   featureCount?: number;
   geojsonPath?: string;
 }
+
+export interface DoneDistrictMessage {
+  phase: "done_district";
+  district: string;
+  id: string;
+  tileCount: number;
+  sizeMB: string;
+  elapsed: string;
+}
+
+export interface DoneMessage {
+  phase: "done";
+  message: string;
+}
+
+export interface ErrorMessage {
+  phase: "error";
+  message: string;
+}
+
+export type SseMessage = ProgressInfo | DoneDistrictMessage | DoneMessage | ErrorMessage;

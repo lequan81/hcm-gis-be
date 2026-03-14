@@ -5,6 +5,9 @@ const e = process.env;
 export const env = {
   PORT: parseInt(e.PORT || "3000", 10),
   CORS_ORIGINS: (e.CORS_ORIGIN || "http://localhost:5173").split(",").map(s => s.trim()),
+  TRUST_PROXY: e.TRUST_PROXY === "true",
+  RATE_LIMIT_WINDOW_MS: parseInt(e.RATE_LIMIT_WINDOW_MS || "60000", 10),
+  RATE_LIMIT_MAX: parseInt(e.RATE_LIMIT_MAX || "45", 10),
 
   TILE_API_URL: e.TILE_API_URL || "https://bando.tphcm.gov.vn/service/gisp/tile/building",
   TILE_REFERER: e.TILE_REFERER || "https://bando.tphcm.gov.vn/",
@@ -33,6 +36,10 @@ export const env = {
 
   // Data retention
   MAX_FILE_AGE_HOURS: parseInt(e.MAX_FILE_AGE_HOURS || "24", 10),
+
+  // Bundle limits
+  MAX_BUNDLE_IDS: parseInt(e.MAX_BUNDLE_IDS || "50", 10),
+  MAX_BUNDLE_BYTES: parseInt(e.MAX_BUNDLE_BYTES || "3800000000", 10),
 } as const;
 
 export const ENABLE_CLEANUP = (e.ENABLE_CLEANUP === "true") || (e.NODE_ENV === "production");

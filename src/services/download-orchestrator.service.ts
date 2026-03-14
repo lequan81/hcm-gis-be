@@ -9,6 +9,7 @@
 import { env } from "../config";
 import { log } from "../utils/logger";
 import { registerMBTiles } from "./mbtiles-registry.service";
+import type { WorkerInput, WorkerAllInput, ProgressInfo, DownloadOutput, SseMessage } from "../types/worker";
 
 const MAX_POOL_SIZE = env.WORKER_POOL_SIZE || 3;
 const cancelledTokens = new Set<string>();
@@ -30,10 +31,10 @@ function getWorkerUrl(filename: string): URL {
  */
 function runWorkerJob(
   workerFile: string,
-  payload: Record<string, unknown>,
-  onProgress: (data: Record<string, unknown>) => void,
+  payload: (WorkerInput | WorkerAllInput) & { LOG_DIR?: string; LOG_FILE?: string },
+  onProgress: (data: ProgressInfo) => void,
   token: string | null
-): Promise<any> {
+): Promise<DownloadOutput | null> {
   return new Promise((resolve) => {
     const worker = new Worker(getWorkerUrl(workerFile));
 
@@ -42,7 +43,7 @@ function runWorkerJob(
       worker.postMessage({ type: "cancel" });
     }
 
-    worker.onmessage = (e: MessageEvent) => {
+    worker.onmessage = (e: MessageEvent<{ type: "progress"; data: ProgressInfo } | { type: "result"; data: DownloadOutput | null }>) => {
       if (e.data.type === "progress") {
         onProgress(e.data.data);
       } else if (e.data.type === "result") {
@@ -137,7 +138,7 @@ export function createDownloadAllStream(geojson: boolean, token: string | null =
   return new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
-      const send = (data: Record<string, unknown>) => {
+      const send = (data: SseMessage) => {
         try { controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { }
       };
 
@@ -158,8 +159,9 @@ export function createDownloadAllStream(geojson: boolean, token: string | null =
             tileCount: result.tileCount, sizeMB: result.sizeMB, elapsed: result.elapsed.toFixed(1)
           });
         }
-      } catch (err: any) {
-        log("ERROR", `Download ALL failed: ${err?.message}`);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log("ERROR", `Download ALL failed: ${message}`);
         send({ phase: "error", message: "Download ALL failed" });
       }
       send({ phase: "done", message: "Finished downloading all HCM tiles" });
@@ -174,7 +176,7 @@ export function createDownloadStream(keys: string[], geojson: boolean, token: st
   return new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
-      const send = (data: Record<string, unknown>) => {
+      const send = (data: SseMessage) => {
         try { controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { }
       };
 
@@ -209,8 +211,9 @@ export function createDownloadStream(keys: string[], geojson: boolean, token: st
                 tileCount: result.tileCount, sizeMB: result.sizeMB, elapsed: result.elapsed.toFixed(1)
               });
             }
-          } catch (err: any) {
-            log("ERROR", `Download failed: ${key}: ${err?.message}`);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            log("ERROR", `Download failed: ${key}: ${message}`);
             send({ phase: "error", message: `Failed: ${key}` });
           }
         }

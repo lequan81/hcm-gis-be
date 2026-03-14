@@ -30,8 +30,9 @@ export async function initRedis(): Promise<boolean> {
     available = true;
     log("INFO", `Redis connected: ${env.REDIS_URL}`);
     return true;
-  } catch (err: any) {
-    log("WARN", `Redis unavailable (${err?.message}). Using in-memory fallback.`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log("WARN", `Redis unavailable (${message}). Using in-memory fallback.`);
     client = null;
     available = false;
     return false;

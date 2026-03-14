@@ -14,7 +14,18 @@ import { DownloadController } from "./controllers/download.controller";
 import { RateLimiter } from "./utils/rate-limiter";
 import { initRedis, closeRedis } from "./utils/redis";
 
-const rateLimiter = new RateLimiter(60000, 45);
+const rateLimiter = new RateLimiter(env.RATE_LIMIT_WINDOW_MS, env.RATE_LIMIT_MAX);
+
+function getClientIp(req: Request, server?: { requestIP?: (req: Request) => { address: string } | null }): string {
+  let ip = server?.requestIP?.(req)?.address || "unknown";
+  if (env.TRUST_PROXY) {
+    const forwarded = req.headers.get("x-forwarded-for");
+    const realIp = req.headers.get("x-real-ip");
+    const candidate = forwarded ? forwarded.split(",")[0]?.trim() : realIp?.trim();
+    if (candidate) ip = candidate;
+  }
+  return ip;
+}
 
 // ── Bootstrap ────────────────────────────────────────────────
 
@@ -39,10 +50,11 @@ startRetentionCleanup();
 Bun.serve({
   port: env.PORT,
   idleTimeout: 255, // Max value (seconds) — prevents SSE streams from being killed
-  async fetch(req) {
+  async fetch(req, server) {
     const url = new URL(req.url);
     const path = url.pathname;
     const origin = req.headers.get("origin");
+    const ip = getClientIp(req, server);
 
     if (req.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
@@ -55,15 +67,15 @@ Bun.serve({
 
     // ── API: check/download bundle (zip) ──
     if (path === "/api/bundle" && req.method === "GET") {
+      if (await rateLimiter.isRateLimited(ip)) return json({ error: "Too many requests" }, 429, origin);
       return DownloadController.downloadBundle(req, url);
     }
 
     // ── API: cancel jobs ──
     if (path === "/api/cancel" && req.method === "POST") {
+      if (await rateLimiter.isRateLimited(ip)) return json({ error: "Too many requests" }, 429, origin);
       return DownloadController.cancelJobs(req, url);
     }
-
-    const ip = req.headers.get("x-forwarded-for") || req.headers.get("x-real-ip") || "unknown";
 
     // ── API: SSE download all ── (async rate limiter)
     if (path === "/api/download-all" && req.method === "GET") {
@@ -80,11 +92,13 @@ Bun.serve({
     // ── API: file endpoints (UUID matched) ──
     const fileMatch = path.match(/^\/api\/files\/([a-f0-9\-]{36})$/i);
     if (fileMatch) {
+      if (await rateLimiter.isRateLimited(ip)) return json({ error: "Too many requests" }, 429, origin);
       return DownloadController.downloadFile(req, fileMatch[1]);
     }
     
     const gjMatch = path.match(/^\/api\/files\/([a-f0-9\-]{36})\/geojson$/i);
     if (gjMatch) {
+      if (await rateLimiter.isRateLimited(ip)) return json({ error: "Too many requests" }, 429, origin);
       return DownloadController.downloadGeoJSON(req, gjMatch[1]);
     }
 

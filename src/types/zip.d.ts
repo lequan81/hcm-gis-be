@@ -6,4 +6,6 @@ export interface ZipEntry {
   name: string;
   /** File size in bytes (used for Content-Length pre-calculation). */
   size: number;
+  /** Last modified time (ms since epoch) used for cache keys. */
+  mtimeMs: number;
 }

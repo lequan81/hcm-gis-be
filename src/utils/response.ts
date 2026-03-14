@@ -1,5 +1,8 @@
 import { env } from "../config";
 
+type JsonValue = string | number | boolean | null | JsonObject | JsonValue[];
+type JsonObject = { [key: string]: JsonValue };
+
 export function corsHeaders(requestOrigin?: string | null): Record<string, string> {
   const origin =
     requestOrigin && env.CORS_ORIGINS.includes(requestOrigin)
@@ -13,7 +16,7 @@ export function corsHeaders(requestOrigin?: string | null): Record<string, strin
   };
 }
 
-export function json(data: unknown, status = 200, requestOrigin?: string | null) {
+export function json(data: JsonValue, status = 200, requestOrigin?: string | null) {
   return new Response(JSON.stringify(data), {
     status,
     headers: { "Content-Type": "application/json", ...corsHeaders(requestOrigin) },

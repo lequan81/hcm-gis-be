@@ -13,7 +13,7 @@ import { log } from "../utils/logger";
 import { MBTilesWriter } from "../utils/mbtiles";
 import { DISTRICTS, getTilesForDistrict } from "../utils/districts";
 import { getVNDateParts } from "../utils/date";
-import type { WorkerInput, TileResult } from "../types/worker";
+import type { WorkerInput, TileResult, DownloadOutput } from "../types/worker";
 
 function tileToLonLat(z: number, x: number, y: number): [number, number, number, number] {
   const n = 2 ** z;
@@ -24,7 +24,12 @@ function tileToLonLat(z: number, x: number, y: number): [number, number, number,
   return [lonMin, latMinRad * 180 / Math.PI, lonMax, latMaxRad * 180 / Math.PI];
 }
 
-function computeCentroid(geometry: { type: string; coordinates: any }): [number, number] | null {
+type GeoJsonPolygon = { type: "Polygon"; coordinates: number[][][] };
+type GeoJsonMultiPolygon = { type: "MultiPolygon"; coordinates: number[][][][] };
+type GeoJsonGeometry = GeoJsonPolygon | GeoJsonMultiPolygon;
+type FeatureProps = Record<string, string | number | boolean | null>;
+
+function computeCentroid(geometry: GeoJsonGeometry): [number, number] | null {
   try {
     let ring: number[][];
     if (geometry.type === "Polygon") ring = geometry.coordinates[0];
@@ -39,8 +44,11 @@ function computeCentroid(geometry: { type: string; coordinates: any }): [number,
 let cancelled = false;
 
 // listen for cancel messages
-self.addEventListener("message", (e: MessageEvent) => {
-  if (e.data && (e.data as any).type === "cancel") {
+type CancelMessage = { type: "cancel" };
+type WorkerMessage = (WorkerInput & { LOG_DIR?: string; LOG_FILE?: string }) | CancelMessage;
+
+self.addEventListener("message", (e: MessageEvent<WorkerMessage>) => {
+  if ("type" in e.data && e.data.type === "cancel") {
     cancelled = true;
   }
 });
@@ -58,23 +66,24 @@ function createJobLog(logDir: string, districtKey: string): (msg: string) => voi
 }
 
 // Patch: Accept LOG_DIR/LOG_FILE from message and set process.env before importing logger
-self.onmessage = async (event: MessageEvent<WorkerInput & { LOG_DIR?: string, LOG_FILE?: string }>) => {
-  if (event.data && event.data.LOG_DIR) {
-    process.env.LOG_DIR = event.data.LOG_DIR;
+self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
+  if ("type" in event.data && event.data.type === "cancel") { cancelled = true; return; }
+  const payload = event.data as WorkerInput & { LOG_DIR?: string; LOG_FILE?: string };
+  if (payload.LOG_DIR) {
+    process.env.LOG_DIR = payload.LOG_DIR;
   }
-  if (event.data && event.data.LOG_FILE) {
-    process.env.LOG_FILE = event.data.LOG_FILE;
+  if (payload.LOG_FILE) {
+    process.env.LOG_FILE = payload.LOG_FILE;
   }
-  if (event.data && (event.data as any).type === "cancel") { cancelled = true; return; }
 
   const { districtKey, zoom, overlap, geojson, outputDir, concurrency, apiUrl, referer, origin, retryDelay,
-    sleepMs = 10, batchSize = 1000 } = event.data;
+    sleepMs = 10, batchSize = 1000 } = payload;
 
   const d = DISTRICTS[districtKey];
   if (!d) { self.postMessage({ type: "result", data: null }); return; }
 
   // Create per-job log
-  const logDir = event.data.LOG_DIR || "./logs";
+  const logDir = payload.LOG_DIR || "./logs";
   const jobLog = createJobLog(logDir, districtKey);
   jobLog(`Download started: ${districtKey} (${d.name})`);
   jobLog(`Config: zoom=${zoom} overlap=${overlap} geojson=${geojson} concurrency=${concurrency} sleepMs=${sleepMs} batchSize=${batchSize}`);
@@ -89,7 +98,6 @@ self.onmessage = async (event: MessageEvent<WorkerInput & { LOG_DIR?: string, LO
   const { tiles } = getTilesForDistrict(districtKey, zoom, overlap);
   const t0 = performance.now();
   const total = tiles.length;
-  const results: TileResult[] = [];
   let idx = 0, done = 0, ok = 0, fail = 0;
 
   jobLog(`Tiles to fetch: ${total}`);
@@ -98,6 +106,54 @@ self.onmessage = async (event: MessageEvent<WorkerInput & { LOG_DIR?: string, LO
     self.postMessage({ type: "progress", data: { done, total, ok, fail, phase, district: districtKey } });
   };
   send("downloading");
+
+  if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
+  const { timestamp } = getVNDateParts();
+  const uuid = crypto.randomUUID();
+  const mbtilesPath = join(outputDir, `hcm_${districtKey}_${timestamp}_${uuid}.mbtiles`);
+
+  const writer = new MBTilesWriter(mbtilesPath, {
+    name: `HCMC ${d.name} Buildings`,
+    description: `Building tiles for ${d.name}`,
+    format: "pbf",
+    type: "overlay",
+    bounds: d.bbox.join(","),
+    center: `${(d.bbox[0] + d.bbox[2]) / 2},${(d.bbox[1] + d.bbox[3]) / 2},${zoom}`,
+    minzoom: String(zoom),
+    maxzoom: String(zoom),
+    json: JSON.stringify({
+      vector_layers: [{
+        id: "region_building3d_index", description: `${d.name} buildings`,
+        fields: { height: "Number", base_height: "Number", landmark: "String", madoituong: "String" }
+      }],
+    }),
+  });
+
+  let VectorTileCtor: typeof import("@mapbox/vector-tile").VectorTile | null = null;
+  let PbfCtor: typeof import("pbf").default | null = null;
+  const features: { type: "Feature"; geometry: GeoJsonGeometry; properties: FeatureProps }[] = [];
+  if (geojson) {
+    const { VectorTile } = await import("@mapbox/vector-tile");
+    const Pbf = (await import("pbf")).default;
+    VectorTileCtor = VectorTile;
+    PbfCtor = Pbf;
+  }
+
+  const batch: TileResult[] = [];
+  let sentWritingPhase = false;
+  let writeQueue = Promise.resolve();
+
+  function flushBatch() {
+    if (batch.length === 0) return;
+    if (!sentWritingPhase) {
+      sentWritingPhase = true;
+      send("writing_mbtiles");
+    }
+    const toWrite = batch.splice(0, batch.length);
+    writeQueue = writeQueue.then(() => {
+      writer.writeBatch(toWrite);
+    });
+  }
 
   async function fetchTile(z: number, x: number, y: number) {
     const url = `${apiUrl}/${z}/${x}/${y}`;
@@ -121,7 +177,27 @@ self.onmessage = async (event: MessageEvent<WorkerInput & { LOG_DIR?: string, LO
       const [z, x, y] = tiles[i];
       const data = await fetchTile(z, x, y);
       if (cancelled) break;
-      if (data) { results.push({ z, x, y, data }); ok++; } else { fail++; }
+      if (data) {
+        if (geojson && VectorTileCtor && PbfCtor) {
+          const [tileW, tileS, tileE, tileN] = tileToLonLat(z, x, y);
+          const tile = new VectorTileCtor(new PbfCtor(data));
+          for (const ln of Object.keys(tile.layers)) {
+            const layer = tile.layers[ln];
+            if (!ln.toLowerCase().includes("building")) continue;
+            for (let j = 0; j < layer.length; j++) {
+              const gj = layer.feature(j).toGeoJSON(x, y, z) as { geometry: { type: string; coordinates: number[][][] | number[][][][] }; properties: FeatureProps };
+              if (gj.geometry.type !== "Polygon" && gj.geometry.type !== "MultiPolygon") continue;
+              const c = computeCentroid(gj.geometry as GeoJsonGeometry);
+              if (!c) continue;
+              if (c[0] < tileW || c[0] >= tileE || c[1] < tileS || c[1] >= tileN) continue;
+              features.push({ type: "Feature", geometry: gj.geometry as GeoJsonGeometry, properties: gj.properties });
+            }
+          }
+        }
+        batch.push({ z, x, y, data });
+        ok++;
+        if (batch.length >= batchSize) flushBatch();
+      } else { fail++; }
       done++;
       if (done % 2 === 0) send("downloading");
       if (sleepMs > 0) await Bun.sleep(sleepMs + Math.random() * (sleepMs * 0.3));
@@ -131,61 +207,32 @@ self.onmessage = async (event: MessageEvent<WorkerInput & { LOG_DIR?: string, LO
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
   send("downloading");
 
+  flushBatch();
+  await writeQueue;
+
   if (cancelled) {
     jobLog(`Cancelled early. ok=${ok} fail=${fail}`);
     log("INFO", `Worker cancelled early: ${districtKey}`);
-    self.postMessage({ type: "result", data: null });
-    return;
-  }
-
-  if (results.length === 0) {
-    jobLog(`No tiles fetched. fail=${fail}`);
-    self.postMessage({ type: "result", data: null });
-    return;
-  }
-
-  // Write MBTiles
-  if (!existsSync(outputDir)) mkdirSync(outputDir, { recursive: true });
-  const { timestamp } = getVNDateParts();
-  const uuid = crypto.randomUUID();
-  const mbtilesPath = join(outputDir, `hcm_${districtKey}_${timestamp}_${uuid}.mbtiles`);
-
-  send("writing_mbtiles");
-  const writer = new MBTilesWriter(mbtilesPath, {
-    name: `HCMC ${d.name} Buildings`,
-    description: `Building tiles for ${d.name}`,
-    format: "pbf",
-    type: "overlay",
-    bounds: d.bbox.join(","),
-    center: `${(d.bbox[0] + d.bbox[2]) / 2},${(d.bbox[1] + d.bbox[3]) / 2},${zoom}`,
-    minzoom: String(zoom),
-    maxzoom: String(zoom),
-    json: JSON.stringify({
-      vector_layers: [{
-        id: "region_building3d_index", description: `${d.name} buildings`,
-        fields: { height: "Number", base_height: "Number", landmark: "String", madoituong: "String" }
-      }],
-    }),
-  });
-
-  for (let i = 0; i < results.length; i += batchSize) {
-    if (cancelled) break;
-    writer.writeBatch(results.slice(i, i + batchSize));
-  }
-  if (cancelled) {
-    log("INFO", `Worker cancelled during write: ${districtKey}`);
-    jobLog(`Cancelled during write`);
     try { writer.close(); } catch { }
     try { unlinkSync(mbtilesPath); } catch { }
     self.postMessage({ type: "result", data: null });
     return;
   }
+
+  if (ok === 0) {
+    jobLog(`No tiles fetched. fail=${fail}`);
+    try { writer.close(); } catch { }
+    try { unlinkSync(mbtilesPath); } catch { }
+    self.postMessage({ type: "result", data: null });
+    return;
+  }
+
   writer.close();
 
   const elapsed = (performance.now() - t0) / 1000;
   const sizeMB = (Bun.file(mbtilesPath).size / 1048576).toFixed(1);
 
-  const output: any = {
+  const output: DownloadOutput = {
     mbtilesPath,
     tileCount: writer.count,
     elapsed,
@@ -195,24 +242,6 @@ self.onmessage = async (event: MessageEvent<WorkerInput & { LOG_DIR?: string, LO
   // GeoJSON extraction
   if (geojson) {
     send("extracting_geojson");
-    const { VectorTile } = await import("@mapbox/vector-tile");
-    const Pbf = (await import("pbf")).default;
-    const features: any[] = [];
-    for (const { z, x, y, data } of results) {
-      const [tileW, tileS, tileE, tileN] = tileToLonLat(z, x, y);
-      const tile = new VectorTile(new Pbf(data));
-      for (const ln of Object.keys(tile.layers)) {
-        const layer = tile.layers[ln];
-        if (!ln.toLowerCase().includes("building")) continue;
-        for (let i = 0; i < layer.length; i++) {
-          const gj = layer.feature(i).toGeoJSON(x, y, z);
-          const c = computeCentroid(gj.geometry as any);
-          if (!c) continue;
-          if (c[0] < tileW || c[0] >= tileE || c[1] < tileS || c[1] >= tileN) continue;
-          features.push({ type: "Feature", geometry: gj.geometry, properties: gj.properties });
-        }
-      }
-    }
     const gjPath = mbtilesPath.replace(".mbtiles", ".geojson");
     await Bun.write(gjPath, JSON.stringify({ type: "FeatureCollection", features }));
     output.featureCount = features.length;
