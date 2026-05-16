@@ -172,10 +172,10 @@ export class DownloadController {
     const origin = req.headers.get("origin");
     const filePath = getMBTilesPath(fileId);
     if (!filePath) return json({ error: "Not found" }, 404, origin);
-    
+
     const file = Bun.file(filePath);
     if (!await file.exists()) return json({ error: "File missing on disk" }, 404, origin);
-    
+
     const name = getMBTilesName(fileId) || "download.mbtiles";
     return this.fileResponse(req, origin, filePath, name, "application/octet-stream");
   }
@@ -184,11 +184,11 @@ export class DownloadController {
     const origin = req.headers.get("origin");
     const mbPath = getMBTilesPath(fileId);
     if (!mbPath) return json({ error: "Not found" }, 404, origin);
-    
+
     const gjPath = mbPath.replace(".mbtiles", ".geojson");
     const gjFile = Bun.file(gjPath);
     if (!await gjFile.exists()) return json({ error: "GeoJSON not found" }, 404, origin);
-    
+
     const gjName = (getMBTilesName(fileId) || "download.mbtiles").replace(".mbtiles", ".geojson");
     return this.fileResponse(req, origin, gjPath, gjName, "application/geo+json");
   }

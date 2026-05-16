@@ -91,7 +91,7 @@ export class ZipStreamer {
             const file = Bun.file(entry.path);
             const buffer = await file.arrayBuffer();
             const fileData = new Uint8Array(buffer);
-            
+
             let crc = Bun.hash.crc32(fileData, 0);
             controller.enqueue(fileData);
             currentOffset += fileData.length;
