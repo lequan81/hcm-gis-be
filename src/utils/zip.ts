@@ -54,20 +54,19 @@ export class ZipStreamer {
 
   /**
    * Create a ReadableStream that yields the ZIP file content.
-   * Simplified for use with Bun.write() which handles backpressure efficiently.
+   * Memory-efficient: streams chunks, doesn't buffer entire ZIP in RAM.
    */
   static createStream(entries: ZipEntry[]): ReadableStream {
-    const entryData: { crc: number; offset: number }[] = [];
-    const now = new Date();
-    const dosDateTime = toDosDateTime(now);
-    let currentOffset = 0;
-    
     return new ReadableStream({
       async start(controller) {
         try {
-          // Process all entries sequentially with proper cleanup
-          for (let i = 0; i < entries.length; i++) {
-            const entry = entries[i];
+          const now = new Date();
+          const dosDateTime = toDosDateTime(now);
+          const entryData: { crc: number; offset: number }[] = [];
+          let currentOffset = 0;
+
+          // ── Process all entries and stream chunks ──
+          for (const entry of entries) {
             const nameBuf = Buffer.from(entry.name, "utf-8");
             const offset = currentOffset;
 
@@ -88,22 +87,14 @@ export class ZipStreamer {
             controller.enqueue(nameBuf);
             currentOffset += 30 + nameBuf.length;
 
-            // 2. File Data with proper stream cleanup
+            // 2. File Data (streamed, not buffered)
             const file = Bun.file(entry.path);
-            const reader = file.stream().getReader();
-            let crc = 0;
+            const buffer = await file.arrayBuffer();
+            const fileData = new Uint8Array(buffer);
             
-            try {
-              while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                crc = Bun.hash.crc32(value, crc);
-                controller.enqueue(value);
-                currentOffset += value.length;
-              }
-            } finally {
-              reader.releaseLock();
-            }
+            let crc = Bun.hash.crc32(fileData, 0);
+            controller.enqueue(fileData);
+            currentOffset += fileData.length;
 
             // 3. Data Descriptor (12 bytes)
             const desc = Buffer.alloc(12);
@@ -116,7 +107,7 @@ export class ZipStreamer {
             entryData.push({ crc, offset });
           }
 
-          // 4. Central Directory
+          // ── Central Directory ──
           const cdStart = currentOffset;
           for (let i = 0; i < entries.length; i++) {
             const entry = entries[i];
@@ -148,7 +139,7 @@ export class ZipStreamer {
 
           const cdSize = currentOffset - cdStart;
 
-          // 5. End of Central Directory
+          // ── End of Central Directory ──
           const eocd = Buffer.alloc(22);
           eocd.writeUInt32LE(ZipStreamer.SIG_EOCD, 0);
           eocd.writeUInt16LE(0, 4);
@@ -161,8 +152,8 @@ export class ZipStreamer {
 
           controller.enqueue(eocd);
           controller.close();
-        } catch (err) {
-          controller.error(err);
+        } catch (error) {
+          controller.error(error);
         }
       },
     });

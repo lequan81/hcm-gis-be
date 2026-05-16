@@ -210,26 +210,29 @@ export class DownloadController {
       );
     }
 
-    // ── Check if in-progress build ──
-    if (existsSync(tmpPath)) {
-      const hasRange = !!req.headers.get("range");
-      if (hasRange) {
-        const partial = this.rangeFromPartial(
-          req,
-          origin,
-          tmpPath,
-          `hcm-tiles-${timestamp}.zip`,
-          "application/zip",
-          totalSize
-        );
-        if (partial) return partial;
-      }
-    }
-
-    // ── Build ZIP file using Bun's native stream (no tee() to avoid HTTP/2 issues) ──
+    // ── Build ZIP and stream directly to disk (memory-efficient) ──
     if (!existsSync(tmpPath)) {
       const stream = ZipStreamer.createStream(zipEntries);
-      await Bun.write(tmpPath, stream);
+      const file = Bun.file(tmpPath);
+      const writer = file.writer();
+
+      const reader = stream.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          // Write chunk directly to disk as it arrives
+          writer.write(value);
+        }
+        await writer.end();
+      } catch (error) {
+        writer.end();
+        throw error;
+      } finally {
+        reader.releaseLock();
+      }
+
+      // Move temp file to cache
       try {
         if (!existsSync(cachePath)) {
           renameSync(tmpPath, cachePath);
@@ -253,13 +256,17 @@ export class DownloadController {
     }
 
     // ── Fallback: serve from tmp if rename failed ──
-    return this.fileResponse(
-      req,
-      origin,
-      tmpPath,
-      `hcm-tiles-${timestamp}.zip`,
-      "application/zip"
-    );
+    if (existsSync(tmpPath)) {
+      return this.fileResponse(
+        req,
+        origin,
+        tmpPath,
+        `hcm-tiles-${timestamp}.zip`,
+        "application/zip"
+      );
+    }
+
+    return json({ error: "Failed to create ZIP" }, 500, origin);
   }
 
   static async prepareBundle(req: Request, url: URL) {
