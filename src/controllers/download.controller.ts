@@ -322,10 +322,14 @@ export class DownloadController {
     return new Response(createDownloadAllStream(geojson, token), {
       headers: {
         "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0, private",
+        "Pragma": "no-cache",
+        "Expires": "0",
         "Connection": "keep-alive",
-        "X-Accel-Buffering": "no", // Nginx: disable buffering
+        "Keep-Alive": "timeout=300, max=100",
+        "X-Accel-Buffering": "no",
         "Transfer-Encoding": "chunked",
+        "X-Content-Type-Options": "nosniff",
         ...corsHeaders(origin),
       },
     });
@@ -340,10 +344,15 @@ export class DownloadController {
     return new Response(createDownloadStream(keys, geojson, token), {
       headers: {
         "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0, private",
+        "Pragma": "no-cache",
+        "Expires": "0",
         "Connection": "keep-alive",
-        "X-Accel-Buffering": "no", // Nginx: disable buffering
+        "Keep-Alive": "timeout=300, max=100",
+        "X-Accel-Buffering": "no",
         "Transfer-Encoding": "chunked",
+        // HTTP/2 specific headers
+        "X-Content-Type-Options": "nosniff",
         ...corsHeaders(origin),
       },
     });

@@ -140,32 +140,47 @@ export function createDownloadAllStream(geojson: boolean, token: string | null =
     async start(controller) {
       const enc = new TextEncoder();
       let lastSendTime = Date.now();
-      const keepAliveInterval = 30000; // 30 seconds for HTTP/2
+      const keepAliveIntervalMs = 15000; // Send keep-alive every 15s (more aggressive)
 
-      // Keep-alive timer to prevent HTTP/2 frame errors on long delays
+      // Aggressive keep-alive timer to prevent HTTP/2 connection drops
       const keepAliveTimer = setInterval(() => {
-        if (!isCancelled && Date.now() - lastSendTime > keepAliveInterval - 5000) {
-          try {
-            controller.enqueue(enc.encode(": keep-alive\n\n")); // SSE comment
-            lastSendTime = Date.now();
-          } catch { }
+        if (!isCancelled) {
+          const timeSinceLastSend = Date.now() - lastSendTime;
+          if (timeSinceLastSend > 12000) { // >12s without data
+            try {
+              controller.enqueue(enc.encode(": KEEPALIVE\n\n")); // SSE comment
+              lastSendTime = Date.now();
+              log("DEBUG", `SSE keep-alive sent (${timeSinceLastSend}ms since last)`);
+            } catch (e) {
+              log("ERROR", `Keep-alive failed (all): ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
         }
-      }, 10000); // Check every 10s
+      }, 5000); // Check every 5s
 
       const send = (data: SseMessage) => {
         if (isCancelled) return;
         try {
-          controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`));
+          const json = JSON.stringify(data);
+          controller.enqueue(enc.encode(`data: ${json}\n\n`));
           lastSendTime = Date.now();
         } catch (e) {
           log("ERROR", `SSE send failed (all): ${e instanceof Error ? e.message : String(e)}`);
           clearInterval(keepAliveTimer);
           isCancelled = true;
+          try { controller.close(); } catch { }
         }
       };
 
       // ── Send immediate ready message (prevents HTTP/2 timeout) ──
-      send({ phase: "ready", message: "Downloading all HCM districts...", timestamp: new Date().toISOString() });
+      try {
+        send({ phase: "ready", message: "Downloading all HCM districts...", timestamp: new Date().toISOString() });
+      } catch (e) {
+        log("ERROR", `Failed to send ready (all): ${e instanceof Error ? e.message : String(e)}`);
+        clearInterval(keepAliveTimer);
+        controller.close();
+        return;
+      }
 
       log("INFO", "Download ALL started");
       try {
@@ -192,8 +207,13 @@ export function createDownloadAllStream(geojson: boolean, token: string | null =
 
       clearInterval(keepAliveTimer);
 
-      send({ phase: "done", message: "Finished downloading all HCM tiles", timestamp: new Date().toISOString() });
-      controller.close();
+      try {
+        send({ phase: "done", message: "Finished downloading all HCM tiles", timestamp: new Date().toISOString() });
+      } catch (e) {
+        log("ERROR", `Failed to send done (all): ${e instanceof Error ? e.message : String(e)}`);
+      }
+
+      try { controller.close(); } catch { }
     },
     cancel() {
       isCancelled = true;
@@ -210,34 +230,49 @@ export function createDownloadStream(keys: string[], geojson: boolean, token: st
     async start(controller) {
       const enc = new TextEncoder();
       let lastSendTime = Date.now();
-      const keepAliveInterval = 30000; // 30 seconds for HTTP/2
+      const keepAliveIntervalMs = 15000; // Send keep-alive every 15s (more aggressive)
 
-      // Keep-alive timer to prevent HTTP/2 frame errors on long delays
+      // Aggressive keep-alive timer to prevent HTTP/2 connection drops
       const keepAliveTimer = setInterval(() => {
-        if (!isCancelled && Date.now() - lastSendTime > keepAliveInterval - 5000) {
-          try {
-            controller.enqueue(enc.encode(": keep-alive\n\n")); // SSE comment
-            lastSendTime = Date.now();
-          } catch { }
+        if (!isCancelled) {
+          const timeSinceLastSend = Date.now() - lastSendTime;
+          if (timeSinceLastSend > 12000) { // >12s without data
+            try {
+              controller.enqueue(enc.encode(": KEEPALIVE\n\n")); // SSE comment
+              lastSendTime = Date.now();
+              log("DEBUG", `SSE keep-alive sent (${timeSinceLastSend}ms since last)`);
+            } catch (e) {
+              log("ERROR", `Keep-alive failed: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
         }
-      }, 10000); // Check every 10s
+      }, 5000); // Check every 5s
 
       const send = (data: SseMessage) => {
         if (isCancelled) return;
         try {
-          controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`));
+          const json = JSON.stringify(data);
+          controller.enqueue(enc.encode(`data: ${json}\n\n`));
           lastSendTime = Date.now();
         } catch (e) {
           log("ERROR", `SSE send failed: ${e instanceof Error ? e.message : String(e)}`);
           clearInterval(keepAliveTimer);
           isCancelled = true;
+          try { controller.close(); } catch { }
         }
       };
 
       const commonPayload = getCommonPayload(geojson);
 
       // ── Send immediate ready message (prevents HTTP/2 timeout) ──
-      send({ phase: "ready", message: `Processing ${keys.length} district(s)`, timestamp: new Date().toISOString() });
+      try {
+        send({ phase: "ready", message: `Processing ${keys.length} district(s)`, timestamp: new Date().toISOString() });
+      } catch (e) {
+        log("ERROR", `Failed to send ready: ${e instanceof Error ? e.message : String(e)}`);
+        clearInterval(keepAliveTimer);
+        controller.close();
+        return;
+      }
 
       // ── Fixed-size worker pool ──
       // Process districts through a pool of MAX_POOL_SIZE concurrent workers.
@@ -296,8 +331,13 @@ export function createDownloadStream(keys: string[], geojson: boolean, token: st
         cancelledTokens.delete(token);
       }
 
-      send({ phase: "done", message: `Finished ${keys.length} district(s)`, timestamp: new Date().toISOString() });
-      controller.close();
+      try {
+        send({ phase: "done", message: `Finished ${keys.length} district(s)`, timestamp: new Date().toISOString() });
+      } catch (e) {
+        log("ERROR", `Failed to send done: ${e instanceof Error ? e.message : String(e)}`);
+      }
+
+      try { controller.close(); } catch { }
     },
     cancel() {
       isCancelled = true;
