@@ -328,7 +328,8 @@ export class DownloadController {
         "Connection": "keep-alive",
         "Keep-Alive": "timeout=300, max=100",
         "X-Accel-Buffering": "no",
-        "Transfer-Encoding": "chunked",
+        // NOTE: Do NOT set Transfer-Encoding: chunked for HTTP/2
+        // HTTP/2 handles streaming natively and doesn't use this header
         "X-Content-Type-Options": "nosniff",
         ...corsHeaders(origin),
       },
@@ -350,8 +351,8 @@ export class DownloadController {
         "Connection": "keep-alive",
         "Keep-Alive": "timeout=300, max=100",
         "X-Accel-Buffering": "no",
-        "Transfer-Encoding": "chunked",
-        // HTTP/2 specific headers
+        // NOTE: Do NOT set Transfer-Encoding: chunked for HTTP/2
+        // HTTP/2 handles streaming natively and doesn't use this header
         "X-Content-Type-Options": "nosniff",
         ...corsHeaders(origin),
       },
