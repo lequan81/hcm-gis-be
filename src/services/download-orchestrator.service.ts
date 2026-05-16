@@ -139,10 +139,33 @@ export function createDownloadAllStream(geojson: boolean, token: string | null =
   return new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
+      let lastSendTime = Date.now();
+      const keepAliveInterval = 30000; // 30 seconds for HTTP/2
+
+      // Keep-alive timer to prevent HTTP/2 frame errors on long delays
+      const keepAliveTimer = setInterval(() => {
+        if (!isCancelled && Date.now() - lastSendTime > keepAliveInterval - 5000) {
+          try {
+            controller.enqueue(enc.encode(": keep-alive\n\n")); // SSE comment
+            lastSendTime = Date.now();
+          } catch { }
+        }
+      }, 10000); // Check every 10s
+
       const send = (data: SseMessage) => {
         if (isCancelled) return;
-        try { controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { }
+        try {
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`));
+          lastSendTime = Date.now();
+        } catch (e) {
+          log("ERROR", `SSE send failed (all): ${e instanceof Error ? e.message : String(e)}`);
+          clearInterval(keepAliveTimer);
+          isCancelled = true;
+        }
       };
+
+      // ── Send immediate ready message (prevents HTTP/2 timeout) ──
+      send({ phase: "ready", message: "Downloading all HCM districts...", timestamp: new Date().toISOString() });
 
       log("INFO", "Download ALL started");
       try {
@@ -166,7 +189,10 @@ export function createDownloadAllStream(geojson: boolean, token: string | null =
         log("ERROR", `Download ALL failed: ${message}`);
         send({ phase: "error", message: "Download ALL failed" });
       }
-      send({ phase: "done", message: "Finished downloading all HCM tiles" });
+
+      clearInterval(keepAliveTimer);
+
+      send({ phase: "done", message: "Finished downloading all HCM tiles", timestamp: new Date().toISOString() });
       controller.close();
     },
     cancel() {
@@ -183,12 +209,35 @@ export function createDownloadStream(keys: string[], geojson: boolean, token: st
   return new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
+      let lastSendTime = Date.now();
+      const keepAliveInterval = 30000; // 30 seconds for HTTP/2
+
+      // Keep-alive timer to prevent HTTP/2 frame errors on long delays
+      const keepAliveTimer = setInterval(() => {
+        if (!isCancelled && Date.now() - lastSendTime > keepAliveInterval - 5000) {
+          try {
+            controller.enqueue(enc.encode(": keep-alive\n\n")); // SSE comment
+            lastSendTime = Date.now();
+          } catch { }
+        }
+      }, 10000); // Check every 10s
+
       const send = (data: SseMessage) => {
         if (isCancelled) return;
-        try { controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { }
+        try {
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`));
+          lastSendTime = Date.now();
+        } catch (e) {
+          log("ERROR", `SSE send failed: ${e instanceof Error ? e.message : String(e)}`);
+          clearInterval(keepAliveTimer);
+          isCancelled = true;
+        }
       };
 
       const commonPayload = getCommonPayload(geojson);
+
+      // ── Send immediate ready message (prevents HTTP/2 timeout) ──
+      send({ phase: "ready", message: `Processing ${keys.length} district(s)`, timestamp: new Date().toISOString() });
 
       // ── Fixed-size worker pool ──
       // Process districts through a pool of MAX_POOL_SIZE concurrent workers.
@@ -232,7 +281,14 @@ export function createDownloadStream(keys: string[], geojson: boolean, token: st
       for (let i = 0; i < poolSize; i++) {
         running.push(processNext());
       }
-      await Promise.all(running);
+
+      try {
+        await Promise.all(running);
+      } catch (err) {
+        log("ERROR", `Stream processing error: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      clearInterval(keepAliveTimer);
 
       // Clean up worker references for this token
       if (token) {
@@ -240,7 +296,7 @@ export function createDownloadStream(keys: string[], geojson: boolean, token: st
         cancelledTokens.delete(token);
       }
 
-      send({ phase: "done", message: `Finished ${keys.length} district(s)` });
+      send({ phase: "done", message: `Finished ${keys.length} district(s)`, timestamp: new Date().toISOString() });
       controller.close();
     },
     cancel() {

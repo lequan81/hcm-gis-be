@@ -320,7 +320,14 @@ export class DownloadController {
     const geojson = url.searchParams.get("geojson") === "true";
     const token = url.searchParams.get("token") || null;
     return new Response(createDownloadAllStream(geojson, token), {
-      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...corsHeaders(origin) },
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no", // Nginx: disable buffering
+        "Transfer-Encoding": "chunked",
+        ...corsHeaders(origin),
+      },
     });
   }
 
@@ -331,7 +338,14 @@ export class DownloadController {
     const token = url.searchParams.get("token") || null;
     if (keys.length === 0) return json({ error: "No keys" }, 400, origin);
     return new Response(createDownloadStream(keys, geojson, token), {
-      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...corsHeaders(origin) },
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no", // Nginx: disable buffering
+        "Transfer-Encoding": "chunked",
+        ...corsHeaders(origin),
+      },
     });
   }
 }
