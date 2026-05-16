@@ -135,10 +135,12 @@ function getCommonPayload(geojson: boolean) {
 // ── Download ALL (single big worker) ──
 
 export function createDownloadAllStream(geojson: boolean, token: string | null = null): ReadableStream {
+  let isCancelled = false;
   return new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
       const send = (data: SseMessage) => {
+        if (isCancelled) return;
         try { controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { }
       };
 
@@ -167,16 +169,22 @@ export function createDownloadAllStream(geojson: boolean, token: string | null =
       send({ phase: "done", message: "Finished downloading all HCM tiles" });
       controller.close();
     },
+    cancel() {
+      isCancelled = true;
+      if (token) cancelWorkers(token);
+    }
   });
 }
 
 // ── Download specific districts (pooled workers) ──
 
 export function createDownloadStream(keys: string[], geojson: boolean, token: string | null = null): ReadableStream {
+  let isCancelled = false;
   return new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
       const send = (data: SseMessage) => {
+        if (isCancelled) return;
         try { controller.enqueue(enc.encode(`data: ${JSON.stringify(data)}\n\n`)); } catch { }
       };
 
@@ -235,5 +243,9 @@ export function createDownloadStream(keys: string[], geojson: boolean, token: st
       send({ phase: "done", message: `Finished ${keys.length} district(s)` });
       controller.close();
     },
+    cancel() {
+      isCancelled = true;
+      if (token) cancelWorkers(token);
+    }
   });
 }

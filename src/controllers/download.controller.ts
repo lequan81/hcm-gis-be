@@ -199,6 +199,7 @@ export class DownloadController {
     if (meta instanceof Response) return meta;
     const { zipEntries, totalSize, cacheKey, cachePath, tmpPath, timestamp } = meta;
 
+    // ── Check if cached ──
     if (existsSync(cachePath)) {
       return this.fileResponse(
         req,
@@ -209,50 +210,56 @@ export class DownloadController {
       );
     }
 
-    const hasRange = !!req.headers.get("range");
-    if (hasRange && existsSync(tmpPath)) {
-      const partial = this.rangeFromPartial(
+    // ── Check if in-progress build ──
+    if (existsSync(tmpPath)) {
+      const hasRange = !!req.headers.get("range");
+      if (hasRange) {
+        const partial = this.rangeFromPartial(
+          req,
+          origin,
+          tmpPath,
+          `hcm-tiles-${timestamp}.zip`,
+          "application/zip",
+          totalSize
+        );
+        if (partial) return partial;
+      }
+    }
+
+    // ── Build ZIP file using Bun's native stream (no tee() to avoid HTTP/2 issues) ──
+    if (!existsSync(tmpPath)) {
+      const stream = ZipStreamer.createStream(zipEntries);
+      await Bun.write(tmpPath, stream);
+      try {
+        if (!existsSync(cachePath)) {
+          renameSync(tmpPath, cachePath);
+        } else {
+          unlinkSync(tmpPath);
+        }
+      } catch {
+        try { unlinkSync(tmpPath); } catch { }
+      }
+    }
+
+    // ── Serve cached file ──
+    if (existsSync(cachePath)) {
+      return this.fileResponse(
         req,
         origin,
-        tmpPath,
+        cachePath,
         `hcm-tiles-${timestamp}.zip`,
-        "application/zip",
-        totalSize
+        "application/zip"
       );
-      if (partial) return partial;
     }
 
-    const stream = ZipStreamer.createStream(zipEntries);
-    const [respStream, cacheStream] = stream.tee();
-    if (!existsSync(tmpPath)) {
-      Bun.write(tmpPath, cacheStream)
-        .then(() => {
-          try {
-            if (!existsSync(cachePath)) {
-              renameSync(tmpPath, cachePath);
-            } else {
-              unlinkSync(tmpPath);
-            }
-          } catch {
-            try { unlinkSync(tmpPath); } catch { }
-          }
-        })
-        .catch(() => {
-          try { unlinkSync(tmpPath); } catch { }
-        });
-    }
-
-    return new Response(respStream, {
-      headers: {
-        "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="hcm-tiles-${timestamp}.zip"`,
-        "Content-Length": String(totalSize),
-        "Cache-Control": "public, max-age=3600",
-        "ETag": `"${cacheKey}"`,
-        "Accept-Ranges": "bytes",
-        ...corsHeaders(origin),
-      },
-    });
+    // ── Fallback: serve from tmp if rename failed ──
+    return this.fileResponse(
+      req,
+      origin,
+      tmpPath,
+      `hcm-tiles-${timestamp}.zip`,
+      "application/zip"
+    );
   }
 
   static async prepareBundle(req: Request, url: URL) {
@@ -306,7 +313,7 @@ export class DownloadController {
     const geojson = url.searchParams.get("geojson") === "true";
     const token = url.searchParams.get("token") || null;
     return new Response(createDownloadAllStream(geojson, token), {
-      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", ...corsHeaders(origin) },
+      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...corsHeaders(origin) },
     });
   }
 
@@ -317,7 +324,7 @@ export class DownloadController {
     const token = url.searchParams.get("token") || null;
     if (keys.length === 0) return json({ error: "No keys" }, 400, origin);
     return new Response(createDownloadStream(keys, geojson, token), {
-      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", ...corsHeaders(origin) },
+      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...corsHeaders(origin) },
     });
   }
 }

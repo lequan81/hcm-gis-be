@@ -54,107 +54,116 @@ export class ZipStreamer {
 
   /**
    * Create a ReadableStream that yields the ZIP file content.
+   * Simplified for use with Bun.write() which handles backpressure efficiently.
    */
   static createStream(entries: ZipEntry[]): ReadableStream {
     const entryData: { crc: number; offset: number }[] = [];
     const now = new Date();
     const dosDateTime = toDosDateTime(now);
+    let currentOffset = 0;
     
     return new ReadableStream({
       async start(controller) {
-        let currentOffset = 0;
+        try {
+          // Process all entries sequentially with proper cleanup
+          for (let i = 0; i < entries.length; i++) {
+            const entry = entries[i];
+            const nameBuf = Buffer.from(entry.name, "utf-8");
+            const offset = currentOffset;
 
-        for (let i = 0; i < entries.length; i++) {
-          const entry = entries[i];
-          const nameBuf = Buffer.from(entry.name, "utf-8");
-          const offset = currentOffset;
+            // 1. Local File Header
+            const header = Buffer.alloc(30);
+            header.writeUInt32LE(ZipStreamer.SIG_LOCAL, 0);
+            header.writeUInt16LE(20, 4);
+            header.writeUInt16LE(0x0808, 6);
+            header.writeUInt16LE(0, 8);
+            header.writeUInt32LE(dosDateTime, 10);
+            header.writeUInt32LE(0, 14);
+            header.writeUInt32LE(0, 18);
+            header.writeUInt32LE(0, 22);
+            header.writeUInt16LE(nameBuf.length, 26);
+            header.writeUInt16LE(0, 28);
 
-          // 1. Local File Header
-          const header = Buffer.alloc(30);
-          header.writeUInt32LE(ZipStreamer.SIG_LOCAL, 0);
-          header.writeUInt16LE(20, 4); // Version needed (2.0)
-          header.writeUInt16LE(0x0808, 6); // Flags: Bit 3 (data descriptor) + Bit 11 (UTF-8)
-          header.writeUInt16LE(0, 8); // Method: Store
-          header.writeUInt32LE(dosDateTime, 10); // MS-DOS Date/Time
-          header.writeUInt32LE(0, 14); // CRC (0 because of bit 3)
-          header.writeUInt32LE(0, 18); // Compressed size (0 because of bit 3)
-          header.writeUInt32LE(0, 22); // Uncompressed size (0 because of bit 3)
-          header.writeUInt16LE(nameBuf.length, 26);
-          header.writeUInt16LE(0, 28); // Extra field len
+            controller.enqueue(header);
+            controller.enqueue(nameBuf);
+            currentOffset += 30 + nameBuf.length;
 
-          controller.enqueue(header);
-          controller.enqueue(nameBuf);
-          currentOffset += 30 + nameBuf.length;
+            // 2. File Data with proper stream cleanup
+            const file = Bun.file(entry.path);
+            const reader = file.stream().getReader();
+            let crc = 0;
+            
+            try {
+              while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                crc = Bun.hash.crc32(value, crc);
+                controller.enqueue(value);
+                currentOffset += value.length;
+              }
+            } finally {
+              reader.releaseLock();
+            }
 
-          // 2. File Data
-          const file = Bun.file(entry.path);
-          const reader = file.stream().getReader();
-          let crc = 0;
-          
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            crc = Bun.hash.crc32(value, crc);
-            controller.enqueue(value);
-            currentOffset += value.length;
+            // 3. Data Descriptor (12 bytes)
+            const desc = Buffer.alloc(12);
+            desc.writeUInt32LE(crc, 0);
+            desc.writeUInt32LE(entry.size, 4);
+            desc.writeUInt32LE(entry.size, 8);
+            controller.enqueue(desc);
+            currentOffset += 12;
+
+            entryData.push({ crc, offset });
           }
 
-          // 3. Data Descriptor (12 bytes)
-          const desc = Buffer.alloc(12);
-          desc.writeUInt32LE(crc, 0);
-          desc.writeUInt32LE(entry.size, 4);
-          desc.writeUInt32LE(entry.size, 8);
-          controller.enqueue(desc);
-          currentOffset += 12;
+          // 4. Central Directory
+          const cdStart = currentOffset;
+          for (let i = 0; i < entries.length; i++) {
+            const entry = entries[i];
+            const meta = entryData[i];
+            const nameBuf = Buffer.from(entry.name, "utf-8");
 
-          entryData.push({ crc, offset });
+            const cd = Buffer.alloc(46);
+            cd.writeUInt32LE(ZipStreamer.SIG_CENTRAL, 0);
+            cd.writeUInt16LE(20, 4);
+            cd.writeUInt16LE(20, 6);
+            cd.writeUInt16LE(0x0808, 8);
+            cd.writeUInt16LE(0, 10);
+            cd.writeUInt32LE(dosDateTime, 12);
+            cd.writeUInt32LE(meta.crc, 16);
+            cd.writeUInt32LE(entry.size, 20);
+            cd.writeUInt32LE(entry.size, 24);
+            cd.writeUInt16LE(nameBuf.length, 28);
+            cd.writeUInt16LE(0, 30);
+            cd.writeUInt16LE(0, 32);
+            cd.writeUInt16LE(0, 34);
+            cd.writeUInt16LE(0, 36);
+            cd.writeUInt32LE(0, 38);
+            cd.writeUInt32LE(meta.offset, 42);
+
+            controller.enqueue(cd);
+            controller.enqueue(nameBuf);
+            currentOffset += 46 + nameBuf.length;
+          }
+
+          const cdSize = currentOffset - cdStart;
+
+          // 5. End of Central Directory
+          const eocd = Buffer.alloc(22);
+          eocd.writeUInt32LE(ZipStreamer.SIG_EOCD, 0);
+          eocd.writeUInt16LE(0, 4);
+          eocd.writeUInt16LE(0, 6);
+          eocd.writeUInt16LE(entries.length, 8);
+          eocd.writeUInt16LE(entries.length, 10);
+          eocd.writeUInt32LE(cdSize, 12);
+          eocd.writeUInt32LE(cdStart, 16);
+          eocd.writeUInt16LE(0, 20);
+
+          controller.enqueue(eocd);
+          controller.close();
+        } catch (err) {
+          controller.error(err);
         }
-
-        // 4. Central Directory
-        const cdStart = currentOffset;
-        for (let i = 0; i < entries.length; i++) {
-          const entry = entries[i];
-          const meta = entryData[i];
-          const nameBuf = Buffer.from(entry.name, "utf-8");
-
-          const cd = Buffer.alloc(46);
-          cd.writeUInt32LE(ZipStreamer.SIG_CENTRAL, 0);
-          cd.writeUInt16LE(20, 4); // Made by
-          cd.writeUInt16LE(20, 6); // Needed
-          cd.writeUInt16LE(0x0808, 8); // Flags
-          cd.writeUInt16LE(0, 10); // Method
-          cd.writeUInt32LE(dosDateTime, 12); // MS-DOS Date/Time
-          cd.writeUInt32LE(meta.crc, 16);
-          cd.writeUInt32LE(entry.size, 20);
-          cd.writeUInt32LE(entry.size, 24);
-          cd.writeUInt16LE(nameBuf.length, 28);
-          cd.writeUInt16LE(0, 30); // Extra len
-          cd.writeUInt16LE(0, 32); // Comment len
-          cd.writeUInt16LE(0, 34); // Disk start
-          cd.writeUInt16LE(0, 36); // Internal attr
-          cd.writeUInt32LE(0, 38); // External attr
-          cd.writeUInt32LE(meta.offset, 42);
-
-          controller.enqueue(cd);
-          controller.enqueue(nameBuf);
-          currentOffset += 46 + nameBuf.length;
-        }
-
-        const cdSize = currentOffset - cdStart;
-
-        // 5. End of Central Directory
-        const eocd = Buffer.alloc(22);
-        eocd.writeUInt32LE(ZipStreamer.SIG_EOCD, 0);
-        eocd.writeUInt16LE(0, 4); // Disk num
-        eocd.writeUInt16LE(0, 6); // CD disk
-        eocd.writeUInt16LE(entries.length, 8); // Disk entries
-        eocd.writeUInt16LE(entries.length, 10); // Total entries
-        eocd.writeUInt32LE(cdSize, 12);
-        eocd.writeUInt32LE(cdStart, 16);
-        eocd.writeUInt16LE(0, 20); // Comment len
-
-        controller.enqueue(eocd);
-        controller.close();
       },
     });
   }
