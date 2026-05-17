@@ -34,7 +34,7 @@ function runWorkerJob(
   payload: (WorkerInput | WorkerAllInput) & { LOG_DIR?: string; LOG_FILE?: string },
   onProgress: (data: ProgressInfo) => void,
   token: string | null
-): Promise<DownloadOutput | null> {
+): Promise<{ result: DownloadOutput | null; reason?: string }> {
   return new Promise((resolve) => {
     const worker = new Worker(getWorkerUrl(workerFile));
 
@@ -43,19 +43,24 @@ function runWorkerJob(
       worker.postMessage({ type: "cancel" });
     }
 
-    worker.onmessage = (e: MessageEvent<{ type: "progress"; data: ProgressInfo } | { type: "result"; data: DownloadOutput | null }>) => {
+    worker.onmessage = (
+      e: MessageEvent<
+        | { type: "progress"; data: ProgressInfo }
+        | { type: "result"; data: DownloadOutput | null; reason?: string }
+      >
+    ) => {
       if (e.data.type === "progress") {
         onProgress(e.data.data);
       } else if (e.data.type === "result") {
         try { worker.terminate(); } catch { }
-        resolve(e.data.data);
+        resolve({ result: e.data.data, reason: e.data.reason });
       }
     };
 
     worker.onerror = (err) => {
       log("ERROR", `Worker error: ${err.message}`);
       try { worker.terminate(); } catch { }
-      resolve(null);
+      resolve({ result: null, reason: err.message || "Worker crashed" });
     };
 
     // Store worker reference for cancellation
@@ -184,7 +189,7 @@ export function createDownloadAllStream(geojson: boolean, token: string | null =
 
       log("INFO", "Download ALL started");
       try {
-        const result = await runWorkerJob(
+        const { result, reason } = await runWorkerJob(
           "download-all.worker",
           getCommonPayload(geojson),
           send,
@@ -193,11 +198,14 @@ export function createDownloadAllStream(geojson: boolean, token: string | null =
 
         if (result) {
           const id = registerMBTiles(result.mbtilesPath);
-          log("INFO", `Download ALL done → #${id} (${result.tileCount} tiles, ${result.sizeMB} MB)`);
+          log("INFO", `Download ALL done -> #${id} (${result.tileCount} tiles, ${result.sizeMB} MB)`);
           send({
             phase: "done_district", district: "all", id,
             tileCount: result.tileCount, sizeMB: result.sizeMB, elapsed: result.elapsed.toFixed(1)
           });
+        } else if (reason && reason !== "Cancelled") {
+          log("WARN", `Download ALL produced no file: ${reason}`);
+          send({ phase: "error", message: `No output file generated: ${reason}` });
         }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -279,6 +287,9 @@ export function createDownloadStream(keys: string[], geojson: boolean, token: st
       // This prevents OOM from spawning 22 workers simultaneously.
       const queue = [...keys];
       const running: Promise<void>[] = [];
+      let successCount = 0;
+      let nullResultCount = 0;
+      const nullReasons: string[] = [];
 
       async function processNext(): Promise<void> {
         while (queue.length > 0) {
@@ -288,7 +299,7 @@ export function createDownloadStream(keys: string[], geojson: boolean, token: st
           log("INFO", `Download started: ${key}`);
 
           try {
-            const result = await runWorkerJob(
+            const { result, reason } = await runWorkerJob(
               "download.worker",
               { ...commonPayload, districtKey: key },
               send,
@@ -297,11 +308,16 @@ export function createDownloadStream(keys: string[], geojson: boolean, token: st
 
             if (result) {
               const id = registerMBTiles(result.mbtilesPath);
-              log("INFO", `Download done: ${key} → #${id} (${result.tileCount} tiles, ${result.sizeMB} MB)`);
+              log("INFO", `Download done: ${key} -> #${id} (${result.tileCount} tiles, ${result.sizeMB} MB)`);
               send({
                 phase: "done_district", district: key, id,
                 tileCount: result.tileCount, sizeMB: result.sizeMB, elapsed: result.elapsed.toFixed(1)
               });
+              successCount++;
+            } else {
+              nullResultCount++;
+              if (reason) nullReasons.push(`${key}: ${reason}`);
+              log("WARN", `Download produced no file: ${key}${reason ? ` (${reason})` : ""}`);
             }
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
@@ -331,6 +347,14 @@ export function createDownloadStream(keys: string[], geojson: boolean, token: st
         cancelledTokens.delete(token);
       }
 
+      if (successCount === 0 && nullResultCount > 0) {
+        const details = nullReasons.length > 0 ? ` ${nullReasons.slice(0, 3).join("; ")}` : "";
+        send({
+          phase: "error",
+          message: `No output file generated for selected district(s).${details}`,
+        });
+      }
+
       try {
         send({ phase: "done", message: `Finished ${keys.length} district(s)`, timestamp: new Date().toISOString() });
       } catch (e) {
@@ -345,3 +369,6 @@ export function createDownloadStream(keys: string[], geojson: boolean, token: st
     }
   });
 }
+
+
+

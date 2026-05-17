@@ -46,6 +46,7 @@ let cancelled = false;
 // listen for cancel messages
 type CancelMessage = { type: "cancel" };
 type WorkerMessage = (WorkerInput & { LOG_DIR?: string; LOG_FILE?: string }) | CancelMessage;
+type WorkerResultMessage = { type: "result"; data: DownloadOutput | null; reason?: string };
 
 self.addEventListener("message", (e: MessageEvent<WorkerMessage>) => {
   if ("type" in e.data && e.data.type === "cancel") {
@@ -80,7 +81,11 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
     sleepMs = 10, batchSize = 1000 } = payload;
 
   const d = DISTRICTS[districtKey];
-  if (!d) { self.postMessage({ type: "result", data: null }); return; }
+  if (!d) {
+    const result: WorkerResultMessage = { type: "result", data: null, reason: `Invalid district key: ${districtKey}` };
+    self.postMessage(result);
+    return;
+  }
 
   // Create per-job log
   const logDir = payload.LOG_DIR || "./logs";
@@ -91,6 +96,10 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
 
   const headers: Record<string, string> = {
     "User-Agent": "Mozilla/5.0",
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9,vi;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
     Referer: referer,
     Origin: origin,
   };
@@ -112,22 +121,36 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
   const uuid = crypto.randomUUID();
   const mbtilesPath = join(outputDir, `hcm_${districtKey}_${timestamp}_${uuid}.mbtiles`);
 
-  const writer = new MBTilesWriter(mbtilesPath, {
-    name: `HCMC ${d.name} Buildings`,
-    description: `Building tiles for ${d.name}`,
-    format: "pbf",
-    type: "overlay",
-    bounds: d.bbox.join(","),
-    center: `${(d.bbox[0] + d.bbox[2]) / 2},${(d.bbox[1] + d.bbox[3]) / 2},${zoom}`,
-    minzoom: String(zoom),
-    maxzoom: String(zoom),
-    json: JSON.stringify({
-      vector_layers: [{
-        id: "region_building3d_index", description: `${d.name} buildings`,
-        fields: { height: "Number", base_height: "Number", landmark: "String", madoituong: "String" }
-      }],
-    }),
-  });
+  let writer: MBTilesWriter;
+  try {
+    writer = new MBTilesWriter(mbtilesPath, {
+      name: `HCMC ${d.name} Buildings`,
+      description: `Building tiles for ${d.name}`,
+      format: "pbf",
+      type: "overlay",
+      bounds: d.bbox.join(","),
+      center: `${(d.bbox[0] + d.bbox[2]) / 2},${(d.bbox[1] + d.bbox[3]) / 2},${zoom}`,
+      minzoom: String(zoom),
+      maxzoom: String(zoom),
+      json: JSON.stringify({
+        vector_layers: [{
+          id: "region_building3d_index", description: `${d.name} buildings`,
+          fields: { height: "Number", base_height: "Number", landmark: "String", madoituong: "String" }
+        }],
+      }),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    jobLog(`MBTiles init failed: ${message}`);
+    log("ERROR", `MBTiles init failed: district=${districtKey}: ${message}`);
+    const result: WorkerResultMessage = {
+      type: "result",
+      data: null,
+      reason: `Cannot create output file (permission/path): ${message}`,
+    };
+    self.postMessage(result);
+    return;
+  }
 
   let VectorTileCtor: typeof import("@mapbox/vector-tile").VectorTile | null = null;
   let PbfCtor: typeof import("pbf").default | null = null;
@@ -140,6 +163,13 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
   }
 
   const batch: TileResult[] = [];
+  const fetchStats = {
+    networkErrors: 0,
+    status4xx: 0,
+    status5xx: 0,
+    statusOther: 0,
+    lastStatus: 0,
+  };
   let sentWritingPhase = false;
   let writeQueue = Promise.resolve();
 
@@ -164,9 +194,18 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
         res = await fetch(url, { headers });
         if (res.status === 404) return null;
       }
-      if (!res.ok) return null;
+      if (!res.ok) {
+        fetchStats.lastStatus = res.status;
+        if (res.status >= 400 && res.status < 500) fetchStats.status4xx++;
+        else if (res.status >= 500 && res.status < 600) fetchStats.status5xx++;
+        else fetchStats.statusOther++;
+        return null;
+      }
       return new Uint8Array(await res.arrayBuffer());
-    } catch { return null; }
+    } catch {
+      fetchStats.networkErrors++;
+      return null;
+    }
   }
 
   async function worker() {
@@ -215,15 +254,29 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
     log("INFO", `Worker cancelled early: ${districtKey}`);
     try { writer.close(); } catch { }
     try { unlinkSync(mbtilesPath); } catch { }
-    self.postMessage({ type: "result", data: null });
+    const result: WorkerResultMessage = { type: "result", data: null, reason: "Cancelled" };
+    self.postMessage(result);
     return;
   }
 
   if (ok === 0) {
-    jobLog(`No tiles fetched. fail=${fail}`);
+    const reason =
+      fetchStats.status4xx > 0
+        ? `Upstream denied tile requests (4xx, last=${fetchStats.lastStatus}).`
+        : fetchStats.status5xx > 0
+          ? `Upstream tile server error (5xx, last=${fetchStats.lastStatus}).`
+          : fetchStats.networkErrors > 0
+            ? "Network error reaching upstream tile server."
+            : "No tiles returned by upstream.";
+    jobLog(`No tiles fetched. fail=${fail}. ${reason}`);
     try { writer.close(); } catch { }
     try { unlinkSync(mbtilesPath); } catch { }
-    self.postMessage({ type: "result", data: null });
+    const result: WorkerResultMessage = {
+      type: "result",
+      data: null,
+      reason,
+    };
+    self.postMessage(result);
     return;
   }
 
